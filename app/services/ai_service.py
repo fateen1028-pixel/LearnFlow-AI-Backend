@@ -637,22 +637,17 @@ Your response:""")
                 "tools": AIService.validate_resources(materials.get("tools", []))
             }
             
-            return {
-                "status": "success", 
-                "materials": validated_materials
-            }
+            # FIX: Return just the validated_materials, not nested under "materials"
+            return validated_materials
             
         except Exception as e:
             print(f"Error fetching materials with search: {e}")
             # Return empty but valid structure
             return {
-                "status": "success",
-                "materials": {
-                    "videos": [],
-                    "articles": [],
-                    "practice": [],
-                    "tools": []
-                }
+                "videos": [],
+                "articles": [],
+                "practice": [],
+                "tools": []
             }
 
     @staticmethod

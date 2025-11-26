@@ -18,9 +18,21 @@ def ask_about_task():
 def get_learning_materials():
     data = request.json
     topic = data.get("topic")
+    tasks = data.get("tasks", [])  # Add this line to get tasks
     
-    result = AIService.get_learning_materials(topic)
-    return jsonify(result)
+    try:
+        result = AIService.get_learning_materials(topic, tasks)  # Pass tasks too
+        # Wrap the result in the expected format
+        return jsonify({
+            "status": "success",
+            "materials": result
+        })
+    except Exception as e:
+        print(f"Error in get_learning_materials: {e}")
+        return jsonify({
+            "status": "error",
+            "message": "Failed to fetch learning materials"
+        }), 500
 
 @ai_bp.route("/ai-env/chat", methods=["POST"])
 @token_required
@@ -35,12 +47,32 @@ def ai_env_chat():
 @token_required
 def generate_flashcards():
     data = request.json
-    result = AIService.generate_flashcards(data)
-    return jsonify(result)
+    try:
+        result = AIService.generate_flashcards(data)
+        return jsonify({
+            "status": "success",
+            "flashcards": result
+        })
+    except Exception as e:
+        print(f"Error in generate_flashcards: {e}")
+        return jsonify({
+            "status": "error",
+            "message": "Failed to generate flashcards"
+        }), 500
 
 @ai_bp.route("/ai-env/study-guide", methods=["POST"])
 @token_required
 def generate_study_guide():
     data = request.json
-    result = AIService.generate_study_guide(data)
-    return jsonify(result)
+    try:
+        result = AIService.generate_study_guide(data)
+        return jsonify({
+            "status": "success",
+            "study_guide": result
+        })
+    except Exception as e:
+        print(f"Error in generate_study_guide: {e}")
+        return jsonify({
+            "status": "error",
+            "message": "Failed to generate study guide"
+        }), 500
