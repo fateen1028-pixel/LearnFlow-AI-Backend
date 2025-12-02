@@ -204,46 +204,45 @@ class PlanService:
                     "message": "No more days available in this plan"
                 }
             
-            # Find the first incomplete task from the next day
+            # Find the first task from the next day
             next_task = todos_col.find_one({
                 "planId": plan_id,
                 "userId": user_id,
-                "day": next_day,
-                "completed": False
-            })
+                "day": next_day
+            }, sort=[("createdAt", 1)])  # Get the first task by creation order
             
             if not next_task:
-                # Try to find any task from next day
-                next_task = todos_col.find_one({
-                    "planId": plan_id,
-                    "userId": user_id,
-                    "day": next_day
-                })
-                
-                if not next_task:
-                    return {
-                        "status": "success",
-                        "task": None,
-                        "message": "No tasks available for next day"
-                    }
+                return {
+                    "status": "success",
+                    "task": None,
+                    "message": "No tasks available for next day"
+                }
             
-            # **FIX: Mark this task as a "bonus" task by updating it in the database**
-            todos_col.update_one(
-                {"_id": next_task["_id"]},
-                {"$set": {"isBonus": True, "originalDay": next_day, "day": current_day}}
-            )
+            # Create a copy of the task for the current day (not modifying original)
+            import copy
+            bonus_task = copy.deepcopy(next_task)
             
-            # Return the updated task
-            next_task['_id'] = str(next_task['_id'])
-            next_task['isBonus'] = True
-            next_task['originalDay'] = next_day
-            next_task['day'] = current_day
+            # Insert as a new task for current day
+            bonus_task['_id'] = ObjectId()  # New ID for the bonus task
+            bonus_task['day'] = current_day
+            bonus_task['originalDay'] = next_day
+            bonus_task['isBonus'] = True
+            bonus_task['bonusFromDay'] = next_day
+            bonus_task['createdAt'] = datetime.now()
+            bonus_task['updatedAt'] = datetime.now()
+            
+            # Insert the bonus task
+            todos_col.insert_one(bonus_task)
+            
+            # Convert for response
+            bonus_task['_id'] = str(bonus_task['_id'])
             
             return {
                 "status": "success",
-                "task": next_task,
-                "message": f"Added first task from day {next_day}",
-                "taskDay": next_day
+                "task": bonus_task,
+                "message": f"Added first task from day {next_day} as bonus",
+                "bonusFromDay": next_day,
+                "currentDay": current_day  # Stay on same day
             }
             
         except Exception as e:

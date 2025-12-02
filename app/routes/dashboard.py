@@ -1,8 +1,7 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from app.middleware.auth import token_required
 from app.services.dashboard_service import DashboardService
 from datetime import datetime
-from flask import request
 
 dashboard_bp = Blueprint('dashboard', __name__)
 
@@ -26,7 +25,8 @@ def health_check():
 @token_required
 def get_dashboard_data():
     user_id = request.user_id
-    result = DashboardService.get_dashboard_data(user_id)
+    time_range = request.args.get('range', 'week')
+    result = DashboardService.get_dashboard_data(user_id, time_range)
     return jsonify(result)
 
 @dashboard_bp.route("/.well-known/appspecific/com.chrome.devtools.json")

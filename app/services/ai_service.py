@@ -1,3 +1,5 @@
+# ai_service.py - COMPLETE FIXED VERSION
+
 import json
 from datetime import datetime
 from langchain_core.messages import HumanMessage, AIMessage
@@ -18,7 +20,8 @@ from app.utils.ai_helpers import (
     search,
     extract_title_from_line,
     extract_domain_from_url,
-    enhanced_process_ai_response  # Add this import
+    enhanced_process_ai_response,
+    detect_language_from_topic
 )
 from app.utils.helpers import get_db
 
@@ -26,6 +29,7 @@ class AIService:
     @staticmethod
     def ask_about_task(user_id, data):
         question = data.get("question")
+        topic = data.get("topic", "")  # FIX: Get topic from data
         tasks_context = data.get("context")
         chat_history_raw = data.get("chat_history", [])
 
@@ -41,59 +45,80 @@ class AIService:
 
         try:
             tasks_str = ""
-            if tasks_context and len(tasks_context) > 0:
+            if tasks_context:
                 tasks_str = "User's current tasks:\n"
                 for task in tasks_context:
                     status = "✅ Completed" if task.get('completed') else "⏳ Pending"
                     tasks_str += f"- [Group: {task.get('parent_task_title')}] {task.get('task')} ({task.get('duration_minutes', 0)}min) - {status}. Description: {task.get('description')}\n"
                 tasks_str += "\n"
-            
             else:
                 tasks_str = "No tasks are currently defined."
 
+            # FIX: Add topic and language to prompt_data
             prompt_data = {
                 "tasks_context": tasks_str,
                 "question": question,
+                "topic": topic,
+                "language": detect_language_from_topic(topic),
                 "chat_history": chat_history
             }
 
-            from app.utils.ai_helpers import llm
             response = run_chain(chat_qa_prompt, prompt_data)
-            if not response:
+
+            if response is None:
                 raise Exception("AI did not return JSON")
 
-            raw_answer = response.content
+            # Handle different possible response structures
+            if "markdown" in response:
+                answer_text = response.get("markdown", "")
+            elif "text" in response:
+                answer_text = response.get("text", "")
+            else:
+                answer_text = str(response)
 
-            # FIX: Use enhanced processing instead of old method
-            processed_data = enhanced_process_ai_response(raw_answer)
+            # Process the answer text to extract code blocks
+            processed = enhanced_process_ai_response(answer_text)
 
             return {
                 "status": "success",
-                "answer": response.get("markdown", ""),
+                "answer": processed["text"],
                 "bullets": response.get("bullets", []),
                 "steps": response.get("steps", []),
                 "bold": response.get("bold", []),
-                "code_blocks": response.get("code_blocks", [])
+                "code_blocks": processed.get("code_blocks", [])
             }
 
         except Exception as e:
             print(f"Error in ask-about-task: {e}")
+            import traceback
+            traceback.print_exc()
             return {"status": "error", "message": "Failed to get AI response"}, 500
+
 
     @staticmethod
     def fetch_current_materials_with_search(topic):
-        # Search for different types of materials
-        video_results = search.run(f"{topic} tutorial video YouTube 2024")
-        article_results = search.run(f"{topic} guide article documentation 2024")
-        practice_results = search.run(f"{topic} practice exercises examples code")
-        tool_results = search.run(f"{topic} tools libraries frameworks")
-        
-        return {
-            "videos": AIService.extract_videos_from_search(video_results),
-            "articles": AIService.extract_articles_from_search(article_results),
-            "practice": AIService.extract_practice_from_search(practice_results),
-            "tools": AIService.extract_tools_from_search(tool_results)
-        }
+        """Fetch materials using web search"""
+        try:
+            # Search for different types of materials
+            video_results = search.run(f"{topic} tutorial video YouTube 2024")
+            article_results = search.run(f"{topic} guide article documentation 2024")
+            practice_results = search.run(f"{topic} practice exercises examples code")
+            tool_results = search.run(f"{topic} tools libraries frameworks")
+            
+            return {
+                "videos": AIService.extract_videos_from_search(video_results),
+                "articles": AIService.extract_articles_from_search(article_results),
+                "practice": AIService.extract_practice_from_search(practice_results),
+                "tools": AIService.extract_tools_from_search(tool_results)
+            }
+        except Exception as e:
+            print(f"Error in search-based materials: {e}")
+            return {
+                "videos": [],
+                "articles": [],
+                "practice": [],
+                "tools": []
+            }
     
 
     @staticmethod
@@ -115,7 +140,7 @@ class AIService:
                             "type": "video"
                         })
         
-        return videos[:5]  # Return top 5 videos
+        return videos[:5]
 
     @staticmethod
     def extract_articles_from_search(results):
@@ -126,7 +151,6 @@ class AIService:
         for line in lines:
             urls = re.findall(r'https?://[^\s]+', line)
             for url in urls:
-                # Exclude video and social media sites
                 if not any(site in url for site in ['youtube.com', 'youtu.be', 'twitter.com', 'facebook.com']):
                     articles.append({
                         "title": extract_title_from_line(line),
@@ -178,48 +202,67 @@ class AIService:
 
     @staticmethod
     def get_ai_generated_materials(topic):
-
-        # Try LLM
-        materials = run_chain(materials_prompt, {"topic": topic})
-
-        # Case A: LLM returned nothing
-        if not materials:
-            return AIService.fetch_current_materials_with_search(topic)
-
-        # Case B: LLM returned empty lists
-        if (
-            len(materials.get("videos", [])) == 0 or
-            len(materials.get("articles", [])) == 0 or
-            len(materials.get("practice", [])) == 0 or
-            len(materials.get("tools", [])) == 0
-        ):
-            fallback = AIService.fetch_current_materials_with_search(topic)
-
-            return {
-                "videos": materials.get("videos") or fallback["videos"],
-                "articles": materials.get("articles") or fallback["articles"],
-                "practice": materials.get("practice") or fallback["practice"],
-                "tools": materials.get("tools") or fallback["tools"],
+        """Generate materials using AI with fallback to search"""
+        try:
+            print(f"Generating materials for topic: {topic}")
+            
+            # FIX: Add language and tasks_context to the prompt data
+            prompt_data = {
+                "topic": topic,
+                "language": detect_language_from_topic(topic),
+                "tasks_context": "No specific tasks provided"
             }
+            
+            # Try LLM first
+            materials = run_chain(materials_prompt, prompt_data)
 
-        # Case C: everything is fine
-        return materials
+            # Case A: LLM returned nothing
+            if not materials:
+                print("LLM returned nothing, using search fallback")
+                return AIService.fetch_current_materials_with_search(topic)
 
+            # Case B: LLM returned empty lists
+            if (
+                len(materials.get("videos", [])) == 0 or
+                len(materials.get("articles", [])) == 0 or
+                len(materials.get("practice", [])) == 0 or
+                len(materials.get("tools", [])) == 0
+            ):
+                print("LLM returned incomplete data, using hybrid approach")
+                fallback = AIService.fetch_current_materials_with_search(topic)
 
+                return {
+                    "videos": materials.get("videos") or fallback["videos"],
+                    "articles": materials.get("articles") or fallback["articles"],
+                    "practice": materials.get("practice") or fallback["practice"],
+                    "tools": materials.get("tools") or fallback["tools"],
+                }
+
+            # Case C: everything is fine
+            print(f"LLM returned complete materials")
+            return materials
+            
+        except Exception as e:
+            print(f"Error in get_ai_generated_materials: {e}")
+            import traceback
+            traceback.print_exc()
+            return AIService.fetch_current_materials_with_search(topic)
 
 
     @staticmethod
     def generate_flashcards(data):
+        """Generate flashcards with proper error handling"""
         topic = data.get("topic")
         user_understanding = data.get("userUnderstanding", {})
         
         try:
             print(f"Generating flashcards for topic: {topic}")
             
-            # FIX: Use run_chain to get structured response
+            # FIX: Add language to prompt data
             result = run_chain(flashcards_prompt, {
                 "topic": topic,
-                "understanding": json.dumps(user_understanding)
+                "understanding": json.dumps(user_understanding),
+                "language": detect_language_from_topic(topic)
             })
             
             print(f"Raw flashcard result: {result}")
@@ -227,7 +270,6 @@ class AIService:
             # Validate the structure
             if result and isinstance(result, dict) and "flashcards" in result:
                 flashcards = result["flashcards"]
-                # Ensure each flashcard has the required fields
                 validated_flashcards = []
                 for card in flashcards:
                     if isinstance(card, dict):
@@ -246,7 +288,6 @@ class AIService:
                     "flashcards": validated_flashcards
                 }
             else:
-                # Fallback: create structured flashcards
                 print("Using fallback flashcards")
                 fallback_flashcards = AIService.create_fallback_flashcards(topic)
                 return {
@@ -256,7 +297,8 @@ class AIService:
                 
         except Exception as e:
             print(f"Error generating flashcards: {e}")
-            # Return structured fallback flashcards
+            import traceback
+            traceback.print_exc()
             fallback_flashcards = AIService.create_fallback_flashcards(topic)
             return {
                 "status": "success",
@@ -267,7 +309,9 @@ class AIService:
     @staticmethod
     def create_fallback_flashcards(topic):
         """Create fallback flashcards when AI generation fails"""
-        if "python" in topic.lower():
+        topic_lower = str(topic).lower()
+        
+        if "python" in topic_lower:
             return [
                 {
                     "question": "What is the difference between a list and a tuple in Python?",
@@ -285,18 +329,6 @@ class AIService:
                     "question": "What are Python decorators and how are they used?",
                     "answer": "Decorators are functions that modify the behavior of other functions. They are denoted by the @ symbol and are placed above function definitions.",
                     "category": "Advanced Concepts",
-                    "difficulty": "medium"
-                },
-                {
-                    "question": "Explain the Global Interpreter Lock (GIL) in Python",
-                    "answer": "The GIL is a mutex that allows only one thread to execute in the interpreter at a time, which can limit performance in multi-threaded CPU-bound programs.",
-                    "category": "Advanced Concepts", 
-                    "difficulty": "hard"
-                },
-                {
-                    "question": "What is list comprehension in Python?",
-                    "answer": "A concise way to create lists. Example: [x**2 for x in range(10)] creates a list of squares from 0 to 81.",
-                    "category": "Data Structures",
                     "difficulty": "medium"
                 }
             ]
@@ -318,29 +350,28 @@ class AIService:
 
     @staticmethod
     def generate_study_guide(data):
+        """Generate study guide with proper error handling"""
         topic = data.get("topic")
         user_understanding = data.get("userUnderstanding", {})
         
         try:
             print(f"Generating study guide for topic: {topic}")
             
-            # Use run_chain to get structured response
+            # FIX: Add language to prompt data
             result = run_chain(study_guide_prompt, {
                 "topic": topic,
-                "understanding": json.dumps(user_understanding)
+                "understanding": json.dumps(user_understanding),
+                "language": detect_language_from_topic(topic)
             })
             
             print(f"Raw study guide result: {result}")
             
-            # Validate the structure
             if result and isinstance(result, dict):
-                # Return the structured study guide
                 return {
                     "status": "success", 
                     "study_guide": result
                 }
             else:
-                # Fallback: create structured study guide
                 print("Using fallback study guide")
                 fallback_guide = AIService.create_fallback_study_guide(topic)
                 return {
@@ -350,7 +381,8 @@ class AIService:
                 
         except Exception as e:
             print(f"Error generating study guide: {e}")
-            # Return structured fallback study guide
+            import traceback
+            traceback.print_exc()
             fallback_guide = AIService.create_fallback_study_guide(topic)
             return {
                 "status": "success",
@@ -420,11 +452,14 @@ class AIService:
 
     @staticmethod
     def handle_ai_chat(user_id, data):
+        """Main handler for AI chat"""
         message = data.get("message")
         topic = data.get("topic")
         tasks = data.get("tasks", [])
         chat_history = data.get("chatHistory", [])
         user_understanding = data.get("userUnderstanding", {})
+        
+        print(f"DEBUG: handle_ai_chat called with topic: {topic}")
         
         # Check if web search is needed
         needs_search = should_use_search(message, topic)
@@ -451,6 +486,7 @@ class AIService:
             else:
                 search_query = f"{topic} {message} tutorial guide examples 2024"
             
+            print(f"DEBUG: Performing search with query: {search_query}")
             search_results = search.run(search_query)
             
             # Convert chat history
@@ -461,25 +497,35 @@ class AIService:
                 else:
                     history_messages.append(AIMessage(content=msg.get('text', '')))
             
+            # FIX: Add language to prompt_data
             prompt_data = {
                 "topic": topic,
                 "search_results": search_results[:2000],
                 "question": message,
                 "understanding": json.dumps(user_understanding),
+                "language": detect_language_from_topic(topic),
                 "chat_history": history_messages
             }
             
-            from app.utils.ai_helpers import llm
-            chain = search_enhanced_prompt | llm
-            response = chain.invoke(prompt_data)
+            response = run_chain(search_enhanced_prompt, prompt_data)
             
-            # FIX: Use enhanced processing instead of old method
-            processed = enhanced_process_ai_response(response.content)
+            if response is None:
+                raise Exception("AI did not return valid JSON")
+            
+            # Process the response
+            response_text = response.get("answer", "")
+            if not response_text:
+                response_text = str(response)
+            
+            processed = enhanced_process_ai_response(response_text) or {
+                "text": response_text,
+                "code_blocks": []
+            }
             
             # Extract resources from search results
-            resources = extract_resources_from_search(search_results, topic)
+            resources = extract_resources_from_search(search_results, topic) or []
             
-            # Update understanding based on conversation
+            # Update understanding
             understanding_update = AIService.calculate_understanding_update(
                 message, processed["text"], user_understanding, topic
             )
@@ -492,22 +538,26 @@ class AIService:
                     "resources": resources,
                     "understandingUpdate": understanding_update,
                     "search_used": True,
-                    "code_blocks": processed.get("code_blocks", [])  # Include code blocks
+                    "code_blocks": processed.get("code_blocks", [])
                 }
             }
             
         except Exception as e:
             print(f"Search-enhanced chat error: {e}")
-            return AIService.handle_regular_chat(data)
+            import traceback
+            traceback.print_exc()
+            return {"status": "error", "message": "Failed to process search-enhanced request"}
 
     @staticmethod
     def handle_regular_chat(data):
-        """Enhanced regular chat implementation"""
+        """Enhanced regular chat implementation with code generation support"""
         message = data.get("message")
-        topic = data.get("topic")
+        topic = data.get("topic")  # FIX: Get topic from data
         tasks = data.get("tasks", [])
         chat_history = data.get("chatHistory", [])
         user_understanding = data.get("userUnderstanding", {})
+        
+        print(f"DEBUG: handle_regular_chat - Topic: {topic}, Message: {message[:50]}...")
         
         # Create context from tasks
         tasks_context = ""
@@ -515,7 +565,8 @@ class AIService:
             tasks_context = "Current learning tasks:\n"
             for task in tasks:
                 status = "✅" if task.get('completed') else "⏳"
-                tasks_context += f"- {status} {task.get('task')}\n"
+                task_title = task.get('task') or task.get('parent_task') or 'Unknown task'
+                tasks_context += f"- {status} {task_title}\n"
         
         # Convert chat history
         history_messages = []
@@ -525,54 +576,66 @@ class AIService:
             else:
                 history_messages.append(AIMessage(content=msg.get('text', '')))
         
-        from app.utils.ai_helpers import llm
-        
         try:
-            response = llm.invoke([
-                HumanMessage(content=f"""You are an expert tutor for {topic}. 
-
-Student's current tasks: {tasks_context}
-
-Student's current understanding level: {json.dumps(user_understanding)}
-
-Student's question: {message}
-
-Please provide a clear, structured response that:
-1. Directly answers the question
-2. Provides examples when helpful
-3. Uses simple language without markdown formatting
-4. Formats code blocks properly with ```language and ``` delimiters
-5. Avoids using **bold** or *italic* markdown
-6. Focuses on educational value
-
-Your response:""")
-            ])
+            # FIX: Prepare the prompt data with ALL required fields including topic
+            prompt_data = {
+                "tasks_context": tasks_context,
+                "question": message,
+                "topic": topic,  # CRITICAL FIX: Add topic
+                "language": detect_language_from_topic(topic),  # CRITICAL FIX: Add language
+                "chat_history": history_messages
+            }
             
-            # FIX: Use enhanced processing instead of old method
-            processed = enhanced_process_ai_response(response.content)
+            print(f"DEBUG: Invoking chain with keys: {list(prompt_data.keys())}")
+            
+            response = run_chain(task_qa_prompt, prompt_data)
+            
+            if response is None:
+                print("DEBUG: AI returned None response")
+                raise Exception("AI did not return valid JSON")
+            
+            print(f"DEBUG: AI response keys: {response.keys() if isinstance(response, dict) else 'not a dict'}")
+            
+            # Extract the answer from the structured response
+            response_text = response.get("answer", "")
+            if not response_text:
+                print("DEBUG: No 'answer' field, trying other fields")
+                response_text = response.get("markdown", "") or response.get("text", "") or str(response)
+            
+            # Get code blocks from response
+            code_blocks = response.get("code_blocks", [])
+            
+            # If there are markdown code blocks in text, extract them
+            processed = enhanced_process_ai_response(response_text)
+            if processed and processed.get("code_blocks"):
+                code_blocks = processed.get("code_blocks")
             
             # Calculate understanding update
             understanding_update = AIService.calculate_understanding_update(
-                message, processed["text"], user_understanding, topic
+                message, response_text, user_understanding, topic
             )
+            
+            print(f"DEBUG: Returning response with {len(code_blocks)} code blocks")
             
             return {
                 "status": "success",
                 "response": {
-                    "text": processed["text"],
+                    "text": response_text,
                     "type": "general",
                     "understandingUpdate": understanding_update,
                     "search_used": False,
-                    "code_blocks": processed.get("code_blocks", [])  # Include code blocks
+                    "code_blocks": code_blocks
                 }
             }
             
         except Exception as e:
             print(f"Regular chat error: {e}")
-            return {"status": "error", "message": "Failed to process request"}, 500
-
-    # FIX: Remove the problematic clean_ai_response and extract_code_blocks methods
-    # and use enhanced_process_ai_response from ai_helpers instead
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error", 
+                "message": f"Failed to process request: {str(e)}"
+            }
 
     @staticmethod
     def calculate_understanding_update(user_message, ai_response, current_understanding, topic):
@@ -591,7 +654,7 @@ Your response:""")
             
             # Calculate improvement based on complexity and engagement
             improvement = complexity_score * 2
-            improvement = min(improvement, 10)  # Cap at 10% per interaction
+            improvement = min(improvement, 10)
             
             new_level = min(current_level + improvement, 100)
             understanding_update[concept] = new_level
@@ -607,7 +670,6 @@ Your response:""")
         """Analyze the complexity of the conversation"""
         score = 0
         
-        # Message length analysis
         user_words = len(user_message.split())
         ai_words = len(ai_response.split())
         
@@ -616,7 +678,6 @@ Your response:""")
         if ai_words > 100:
             score += 3
         
-        # Question complexity analysis
         complex_indicators = [
             'how does', 'why does', 'explain', 'compare', 'difference between',
             'implement', 'optimize', 'architecture', 'best practice', 'advanced'
@@ -626,11 +687,10 @@ Your response:""")
             if indicator in user_message.lower():
                 score += 2
         
-        # Code presence analysis
         if '```' in ai_response:
             score += 3
         
-        return min(score, 5)  # Cap at 5
+        return min(score, 5)
 
     @staticmethod
     def extract_key_concepts(text, main_topic):
@@ -638,7 +698,7 @@ Your response:""")
         concepts = set()
         
         # Always include main topic
-        concepts.add(main_topic.lower())
+        concepts.add(str(main_topic).lower())
         
         # Technical terms
         technical_terms = [
@@ -652,34 +712,7 @@ Your response:""")
             if len(word) > 4 and word in technical_terms:
                 concepts.add(word)
         
-        return list(concepts)
-
-    @staticmethod
-    def get_learning_materials(topic):
-        """Enhanced materials fetching with better error handling"""
-        try:
-            # Use search to find current materials
-            materials = AIService.fetch_current_materials_with_search(topic)
-            
-            # Validate and clean materials
-            validated_materials = {
-                "videos": AIService.validate_resources(materials.get("videos", [])),
-                "articles": AIService.validate_resources(materials.get("articles", [])),
-                "practice": AIService.validate_resources(materials.get("practice", [])),
-                "tools": AIService.validate_resources(materials.get("tools", []))
-            }
-            
-            return validated_materials
-            
-        except Exception as e:
-            print(f"Error fetching materials with search: {e}")
-            # Return empty but valid structure
-            return {
-                "videos": [],
-                "articles": [],
-                "practice": [],
-                "tools": []
-            }
+        return list(concepts)[:10]
 
     @staticmethod
     def validate_resources(resources):
@@ -687,14 +720,12 @@ Your response:""")
         validated = []
         for resource in resources:
             if isinstance(resource, dict) and resource.get('url'):
-                # Ensure required fields
                 clean_resource = {
                     'url': resource['url'],
                     'title': resource.get('title', resource.get('name', 'Unknown')),
                     'type': resource.get('type', 'unknown')
                 }
                 
-                # Add optional fields if they exist
                 optional_fields = ['channel', 'source', 'duration', 'description', 'difficulty']
                 for field in optional_fields:
                     if field in resource:
@@ -702,4 +733,4 @@ Your response:""")
                 
                 validated.append(clean_resource)
         
-        return validated[:8]  # Limit to 8 resources per category
+        return validated[:8]

@@ -64,7 +64,7 @@ def check_initial_data():
     return jsonify(result)
 
 # ADD THIS NEW ROUTE
-@plans_bp.route("/todos/plan/<plan_id>/next-day-task", methods=["GET"])
+@plans_bp.route("/todos/plan/<plan_id>/next-day-task", methods=["POST"])  # Change to POST
 @token_required
 def get_next_day_task(plan_id):
     user_id = request.user_id
