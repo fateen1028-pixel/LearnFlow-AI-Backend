@@ -1,3 +1,5 @@
+# ai_helpers.py - COMPLETE FIXED VERSION
+
 import os
 import json
 import re
@@ -59,8 +61,11 @@ def detect_language_from_topic(topic: str) -> str:
 # Prompt templates (updated)
 # -------------------------
 
+# FIX: Removed ("system", ...) and merged instructions into the ("human", ...) message
+# as Gemini does not support the "system" role.
 chat_qa_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a professional AI tutor. You MUST respond with ONLY valid JSON, no other text.
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", """You are a professional AI tutor. You MUST respond with ONLY valid JSON, no other text.
 
 CRITICAL: Your entire response must be ONLY a JSON object. Do not write any text before or after the JSON.
 
@@ -86,9 +91,9 @@ Instructions:
 
 Topic: {topic}
 Tasks: {tasks_context}
-"""),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}")
+
+---
+Question: {question}""")
 ])
 
 
@@ -131,11 +136,11 @@ Rules:
 """)
 
 
-
-
-# task_qa_prompt updated to reference topic + language
+# FIX: Removed ("system", ...) and merged instructions into the ("human", ...) message
+# as Gemini does not support the "system" role.
 task_qa_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a professional AI tutor. You MUST respond with ONLY valid JSON, no other text.
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", """You are a professional AI tutor. You MUST respond with ONLY valid JSON, no other text.
 
 CRITICAL: Your entire response must be ONLY a JSON object. Do not write any text before or after the JSON.
 
@@ -159,9 +164,11 @@ Instructions:
 - CRITICAL: Return ONLY the JSON object, nothing else
 
 Topic: {topic}
-"""),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "Tasks: {tasks_context}\\n\\nQuestion: {question}")
+
+---
+Tasks: {tasks_context}
+
+Question: {question}""")
 ])
 
 
@@ -289,8 +296,11 @@ Topic: {topic}
 
 Return ONLY the JSON object, nothing else.""")
 
+# FIX: Removed ("system", ...) and merged instructions into the ("human", ...) message
+# as Gemini does not support the "system" role.
 search_enhanced_prompt = ChatPromptTemplate.from_messages([
-    ("system", """
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", """
 You are an expert tutor with access to search results.
 
 Return ONLY valid JSON with:
@@ -318,12 +328,11 @@ Search Results:
 
 User understanding:
 {understanding}
-"""),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}")
+
+---
+Question: {question}
+""")
 ])
-
-
 
 
 def extract_json_from_text(text: str) -> dict:
@@ -611,7 +620,7 @@ def extract_resources_from_search(search_results: str, topic: str) -> list:
 
     for line in lines:
         if 'http' in line:
-            urls = re.findall(r'https?://[^\s]+', line)
+            urls = re.findall(r'httpsK?://[^\s]+', line)
             for url in urls:
                 resource_type = classify_resource_type(url, line)
                 title = extract_title_from_line(line)
@@ -653,7 +662,7 @@ def classify_resource_type(url: str, context: str) -> str:
 
 def extract_title_from_line(line: str) -> str:
     """Extract a title from search result line"""
-    clean_line = re.sub(r'https?://[^\s]+', '', line)
+    clean_line = re.sub(r'httpsK?://[^\s]+', '', line)
     clean_line = clean_line.strip(' -•')
     return clean_line[:60] + ('...' if len(clean_line) > 60 else '')
 
