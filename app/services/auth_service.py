@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from bson import ObjectId
 from app.models.user import User
 from app.utils.helpers import get_db, get_jwt_secret, initialize_firebase, verify_firebase_token
+from app.services.email_service import EmailService
 
 class AuthService:
     @staticmethod
@@ -125,4 +126,112 @@ class AuthService:
             return {
                 "status": "error", 
                 "message": f"Authentication failed: {str(e)}"
+            }, 500
+        
+    @staticmethod
+    def initiate_password_reset(email):
+        """Initiate password reset process"""
+        users_col = get_db().users
+        
+        # Find user by email
+        user = users_col.find_one({"email": email})
+        if not user:
+            # Return success even if user doesn't exist (for security)
+            print(f"ℹ️ Password reset requested for non-existent email: {email}")
+            return {
+                "status": "success",
+                "message": "If an account exists with this email, you will receive a password reset link."
+            }
+        
+        # Generate reset token
+        reset_token = EmailService.generate_reset_token(user['_id'], email)
+        if not reset_token:
+            return {
+                "status": "error",
+                "message": "Failed to generate reset token. Please try again."
+            }, 500
+        
+        # Send reset email
+        email_sent = EmailService.send_password_reset_email(email, reset_token)
+        
+        if email_sent:
+            # Store reset token in database (optional, for validation)
+            users_col.update_one(
+                {"_id": user['_id']},
+                {"$set": {
+                    "reset_token": reset_token,
+                    "reset_token_expires": datetime.utcnow() + timedelta(hours=1),
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+            
+            return {
+                "status": "success",
+                "message": "Password reset email sent. Please check your inbox."
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to send password reset email. Please try again later."
+            }, 500
+
+    @staticmethod
+    def reset_password(token, new_password):
+        """Reset password using token"""
+        # Verify token
+        payload = EmailService.verify_reset_token(token)
+        if not payload:
+            return {
+                "status": "error",
+                "message": "Invalid or expired reset token."
+            }, 400
+        
+        user_id = payload.get('user_id')
+        email = payload.get('email')
+        
+        if not user_id or not email:
+            return {
+                "status": "error",
+                "message": "Invalid reset token."
+            }, 400
+        
+        users_col = get_db().users
+        
+        # Find user
+        try:
+            user = users_col.find_one({"_id": ObjectId(user_id), "email": email})
+        except:
+            user = None
+        
+        if not user:
+            return {
+                "status": "error",
+                "message": "User not found."
+            }, 404
+        
+        # Hash new password
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+        
+        # Update password and clear reset token
+        update_result = users_col.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {
+                "password": hashed_password,
+                "updated_at": datetime.utcnow()
+            },
+            "$unset": {
+                "reset_token": "",
+                "reset_token_expires": ""
+            }}
+        )
+        
+        if update_result.modified_count > 0:
+            return {
+                "status": "success",
+                "message": "Password has been reset successfully. You can now login with your new password."
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to reset password. Please try again."
             }, 500

@@ -74,3 +74,76 @@ def debug_login():
 def debug_firebase():
     from app.utils.helpers import get_firebase_status
     return jsonify(get_firebase_status())
+
+
+
+@auth_bp.route("/auth/forgot-password", methods=["POST"])
+def forgot_password():
+    """Initiate password reset process"""
+    data = request.json
+    if not data:
+        return jsonify({"status": "error", "message": "No JSON data provided"}), 400
+    
+    email = data.get('email')
+    if not email:
+        return jsonify({"status": "error", "message": "Email is required"}), 400
+    
+    if not re.match(r'^[^@]+@[^@]+\.[^@]+$', email):
+        return jsonify({"status": "error", "message": "Invalid email format"}), 400
+    
+    result = AuthService.initiate_password_reset(email)
+    
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@auth_bp.route("/auth/reset-password", methods=["POST"])
+def reset_password():
+    """Reset password using token"""
+    data = request.json
+    if not data:
+        return jsonify({"status": "error", "message": "No JSON data provided"}), 400
+    
+    token = data.get('token')
+    new_password = data.get('password')
+    
+    if not token:
+        return jsonify({"status": "error", "message": "Reset token is required"}), 400
+    
+    if not new_password:
+        return jsonify({"status": "error", "message": "New password is required"}), 400
+    
+    if len(new_password) < 6:
+        return jsonify({"status": "error", "message": "Password must be at least 6 characters"}), 400
+    
+    result = AuthService.reset_password(token, new_password)
+    
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@auth_bp.route("/auth/verify-reset-token", methods=["POST"])
+def verify_reset_token():
+    """Verify if reset token is valid"""
+    data = request.json
+    if not data:
+        return jsonify({"status": "error", "message": "No JSON data provided"}), 400
+    
+    token = data.get('token')
+    if not token:
+        return jsonify({"status": "error", "message": "Token is required"}), 400
+    
+    from app.services.email_service import EmailService
+    payload = EmailService.verify_reset_token(token)
+    
+    if payload:
+        return jsonify({
+            "status": "success",
+            "message": "Token is valid",
+            "email": payload.get('email')
+        })
+    else:
+        return jsonify({
+            "status": "error",
+            "message": "Invalid or expired token"
+        }), 400
