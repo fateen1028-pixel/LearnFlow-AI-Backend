@@ -5,6 +5,7 @@ from datetime import datetime
 from langchain_core.messages import HumanMessage, AIMessage
 import re
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from typing import List, Dict, Any
 from app.utils.ai_helpers import (
     run_chain, 
     process_ai_response, 
@@ -24,6 +25,8 @@ from app.utils.ai_helpers import (
     detect_language_from_topic
 )
 from app.utils.helpers import get_db
+from app.utils.pinecone_service import get_pinecone_service, is_pinecone_available
+from app.utils.ai_helpers import create_memory_context, store_conversation_memory
 
 class AIService:
     @staticmethod
@@ -471,13 +474,24 @@ class AIService:
 
     @staticmethod
     def handle_search_enhanced_chat(data, search_type):
-        """Handle chat with web search integration"""
+        """Handle chat with web search integration and MEMORY"""
         message = data.get("message")
         topic = data.get("topic")
         chat_history = data.get("chatHistory", [])
         user_understanding = data.get("userUnderstanding", {})
+        user_id = data.get("user_id")  # Get user_id from data
         
         try:
+            # Get memory context if Pinecone is available
+            memory_context_data = {"context_text": "", "similar_chats": []}
+            if user_id and topic and is_pinecone_available():
+                memory_context_data = create_memory_context(
+                    query=message,
+                    user_id=user_id,
+                    topic=topic,
+                    use_memory=True
+                )
+            
             # Perform web search based on query type
             if 'trend' in message.lower() or 'current' in message.lower():
                 search_query = f"{topic} current trends developments 2024"
@@ -497,14 +511,15 @@ class AIService:
                 else:
                     history_messages.append(AIMessage(content=msg.get('text', '')))
             
-            # FIX: Add language to prompt_data
+            # FIX: Add language and memory context to prompt_data
             prompt_data = {
                 "topic": topic,
                 "search_results": search_results[:2000],
                 "question": message,
                 "understanding": json.dumps(user_understanding),
                 "language": detect_language_from_topic(topic),
-                "chat_history": history_messages
+                "chat_history": history_messages,
+                "memory_context": memory_context_data["context_text"]  # Add memory context
             }
             
             response = run_chain(search_enhanced_prompt, prompt_data)
@@ -530,6 +545,24 @@ class AIService:
                 message, processed["text"], user_understanding, topic
             )
             
+            # STORE IN MEMORY if Pinecone is available and response is successful
+            storage_success = False
+            session_id = data.get("session_id", f"session_{datetime.now().timestamp()}")
+            if user_id and is_pinecone_available() and response_text:
+                storage_success = store_conversation_memory(
+                    user_id=user_id,
+                    user_message=message,
+                    ai_response=response_text,
+                    topic=topic,
+                    session_id=session_id,
+                    metadata={
+                        "search_enhanced": True,
+                        "search_type": search_type,
+                        "resource_count": len(resources),
+                        "understanding_level": understanding_update.get(topic, 0)
+                    }
+                )
+            
             return {
                 "status": "success",
                 "response": {
@@ -538,7 +571,10 @@ class AIService:
                     "resources": resources,
                     "understandingUpdate": understanding_update,
                     "search_used": True,
-                    "code_blocks": processed.get("code_blocks", [])
+                    "code_blocks": processed.get("code_blocks", []),
+                    "memory_used": bool(memory_context_data["context_text"]),
+                    "similar_past_chats": memory_context_data.get("similar_chats", []),
+                    "memory_stored": storage_success
                 }
             }
             
@@ -550,14 +586,15 @@ class AIService:
 
     @staticmethod
     def handle_regular_chat(data):
-        """Enhanced regular chat implementation with STRONG code generation support"""
+        """Enhanced regular chat implementation with STRONG code generation support and MEMORY"""
         message = data.get("message")
         topic = data.get("topic")
         tasks = data.get("tasks", [])
         chat_history = data.get("chatHistory", [])
         user_understanding = data.get("userUnderstanding", {})
+        user_id = data.get("user_id")  # Get user_id from data
         
-        print(f"DEBUG: handle_regular_chat - Topic: {topic}, Message: {message[:50]}...")
+        print(f"DEBUG: handle_regular_chat - Topic: {topic}, Message: {message[:50]}..., User: {user_id}")
         
         # STRONG CODE REQUEST DETECTION
         is_code_request = any(keyword in message.lower() for keyword in [
@@ -596,6 +633,16 @@ class AIService:
                 task_title = task.get('task') or task.get('parent_task') or 'Unknown task'
                 tasks_context += f"- {status} {task_title}\n"
         
+        # Get memory context if Pinecone is available
+        memory_context_data = {"context_text": "", "similar_chats": []}
+        if user_id and topic and is_pinecone_available():
+            memory_context_data = create_memory_context(
+                query=message,
+                user_id=user_id,
+                topic=topic,
+                use_memory=True
+            )
+        
         # Convert chat history
         history_messages = []
         for msg in chat_history:
@@ -612,11 +659,12 @@ class AIService:
                 "topic": topic,
                 "language": detect_language_from_topic(topic),
                 "chat_history": history_messages,
-                "is_code_request": is_code_request  # Add flag for code generation
+                "is_code_request": is_code_request,
+                "memory_context": memory_context_data["context_text"]  # Add memory context
             }
             
             print(f"DEBUG: Code request detected: {is_code_request}")
-            print(f"DEBUG: Invoking chain with enhanced prompt")
+            print(f"DEBUG: Memory context available: {bool(memory_context_data['context_text'])}")
             
             response = run_chain(task_qa_prompt, prompt_data)
             
@@ -664,6 +712,24 @@ class AIService:
             
             print(f"DEBUG: Returning response with {len(code_blocks)} code blocks")
             
+            # STORE IN MEMORY if Pinecone is available and response is successful
+            storage_success = False
+            session_id = data.get("session_id", f"session_{datetime.now().timestamp()}")
+            if user_id and is_pinecone_available() and response_text:
+                storage_success = store_conversation_memory(
+                    user_id=user_id,
+                    user_message=message,
+                    ai_response=response_text,
+                    topic=topic,
+                    session_id=session_id,
+                    metadata={
+                        "code_request": is_code_request,
+                        "has_code_blocks": len(code_blocks) > 0,
+                        "understanding_level": understanding_update.get(topic, 0)
+                    }
+                )
+                print(f"DEBUG: Memory storage {'successful' if storage_success else 'failed'}")
+            
             return {
                 "status": "success",
                 "response": {
@@ -672,7 +738,10 @@ class AIService:
                     "understandingUpdate": understanding_update,
                     "search_used": False,
                     "code_blocks": code_blocks,
-                    "is_code_response": is_code_request and len(code_blocks) > 0
+                    "is_code_response": is_code_request and len(code_blocks) > 0,
+                    "memory_used": bool(memory_context_data["context_text"]),
+                    "similar_past_chats": memory_context_data.get("similar_chats", []),
+                    "memory_stored": storage_success
                 }
             }
             
@@ -706,7 +775,9 @@ class AIService:
                             "language": default_language,
                             "code": fallback_code
                         }],
-                        "is_code_response": True
+                        "is_code_response": True,
+                        "memory_used": False,
+                        "memory_stored": False
                     }
                 }
             
@@ -812,3 +883,41 @@ class AIService:
                 validated.append(clean_resource)
         
         return validated[:8]
+    
+
+    @staticmethod
+    def get_user_memory_stats(user_id: str) -> Dict:
+        """Get user's memory statistics."""
+        try:
+            if not is_pinecone_available():
+                return {"available": False, "message": "Memory system not available"}
+            
+            pinecone_service = get_pinecone_service()
+            if not pinecone_service:
+                return {"available": False, "message": "Memory service not initialized"}
+            
+            stats = pinecone_service.get_stats(user_id)
+            stats["available"] = True
+            return stats
+            
+        except Exception as e:
+            print(f"Error getting memory stats: {e}")
+            return {"available": False, "error": str(e)}
+
+    @staticmethod
+    def clear_user_memory(user_id: str) -> Dict:
+        """Clear all memory for a user."""
+        try:
+            if not is_pinecone_available():
+                return {"success": False, "message": "Memory system not available"}
+            
+            pinecone_service = get_pinecone_service()
+            if not pinecone_service:
+                return {"success": False, "message": "Memory service not initialized"}
+            
+            success = pinecone_service.delete_user_chats(user_id)
+            return {"success": success, "message": "Memory cleared" if success else "Failed to clear memory"}
+            
+        except Exception as e:
+            print(f"Error clearing memory: {e}")
+            return {"success": False, "error": str(e)}

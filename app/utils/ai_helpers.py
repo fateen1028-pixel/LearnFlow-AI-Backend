@@ -7,6 +7,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, Prom
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import JsonOutputParser
+from datetime import datetime
+from typing import List, Dict, Any, Optional
 
 # LLM Setup
 gemini_api_key = os.getenv("GOOGLE_API_KEY")
@@ -152,15 +154,24 @@ CODE GENERATION PRIORITY:
 - Make code PRACTICAL, RUNNABLE, and WELL-COMMENTED
 - Focus on IMPLEMENTATION, not just theory
 
+PAST CONVERSATIONS CONTEXT:
+{memory_context}
+
+IMPORTANT: When using past conversations:
+1. Reference them naturally if relevant
+2. Build upon previous explanations
+3. Don't repeat the same answer word-for-word
+4. Update or correct if new information is available
+
 REQUIRED JSON structure for CODE REQUESTS:
 {{
-  "answer": "# Complete Answer with CODE\\n\\nExplanation of what the code does...\\n\\n```{language}\\n# COMPLETE CODE HERE\\ndef example():\\n    return 'Working code'\\n```\\n\\nExplanation of how it works...",
+  "answer": "# Complete Answer with CODE\\n\\nExplanation of what the code does...\\n\\n```{{language}}\\n# COMPLETE CODE HERE\\ndef example():\\n    return 'Working code'\\n```\\n\\nExplanation of how it works...",
   "key_points": ["Point 1", "Point 2"],
   "steps": ["Step 1: Set up", "Step 2: Write function", "Step 3: Test"],
   "examples": ["Code explanation"],
   "code_blocks": [
     {{
-      "language": "{language}",
+      "language": "{{language}}",
       "code": "# Complete working code\\ndef main():\\n    print('Hello World')\\n\\nif __name__ == '__main__':\\n    main()"
     }}
   ]
@@ -177,7 +188,7 @@ REQUIRED JSON structure for NON-CODE requests:
 
 CRITICAL RULES:
 1. For code requests: code_blocks MUST contain at least ONE complete code snippet
-2. Use {language} for ALL code examples (if 'auto', choose appropriate language)
+2. Use {{language}} for ALL code examples (if 'auto', choose appropriate language)
 3. Make answer field COMPLETE with Markdown formatting
 4. Code must be WELL-FORMATTED, INDENTED, and COMPLETE
 5. Include COMMENTS in code for clarity
@@ -321,25 +332,29 @@ Return ONLY the JSON object, nothing else.""")
 search_enhanced_prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", """
-You are an expert tutor with access to search results.
+You are an expert tutor with access to search results and past conversations.
+
+PAST CONVERSATIONS CONTEXT:
+{memory_context}
 
 Return ONLY valid JSON with:
 
-{
+{{
   "answer": "Full explanation",
   "key_points": ["Point 1", "Point 2"],
-  "updated_understanding": {"concept": 60},
+  "updated_understanding": {{"concept": 60}},
   "resources": [
-    {
+    {{
       "title": "Resource",
       "url": "https://example.com",
       "type": "video/article/tool"
-    }
+    }}
   ]
-}
+}}
 
 Rules:
 - Use search results only inside the JSON.
+- Reference past conversations if relevant.
 - No markdown.
 - No text outside JSON.
 
@@ -920,3 +935,119 @@ def extract_concepts_with_context(text, main_topic):
             unique_concepts.append(concept)
 
     return unique_concepts[:6]
+
+
+
+def format_retrieved_context(similar_chats: List[Dict]) -> str:
+    """
+    Format retrieved similar chats into context string.
+    """
+    if not similar_chats:
+        return ""
+    
+    context_lines = ["\n\n## 📚 Relevant Past Conversations:"]
+    
+    for i, chat in enumerate(similar_chats, 1):
+        user_msg = chat.get("user_message", "").strip()
+        ai_resp = chat.get("ai_response", "").strip()
+        
+        if user_msg and ai_resp:
+            # Truncate if too long
+            if len(user_msg) > 200:
+                user_msg = user_msg[:200] + "..."
+            if len(ai_resp) > 300:
+                ai_resp = ai_resp[:300] + "..."
+            
+            context_lines.append(f"\n{i}. **User**: {user_msg}")
+            context_lines.append(f"   **AI**: {ai_resp}")
+    
+    context_lines.append("\n---")
+    return "\n".join(context_lines)
+
+
+def create_memory_context(
+    query: str, 
+    user_id: str, 
+    topic: str, 
+    use_memory: bool = True
+) -> Dict[str, Any]:
+    """
+    Create context from memory if available.
+    Returns: dict with context_text and similar_chats
+    """
+    if not use_memory:
+        return {"context_text": "", "similar_chats": []}
+    
+    try:
+        from app.utils.pinecone_service import get_pinecone_service
+        
+        pinecone_service = get_pinecone_service()
+        if not pinecone_service:
+            return {"context_text": "", "similar_chats": []}
+        
+        # Search for similar past chats
+        similar_chats = pinecone_service.search_similar_chats(
+            user_id=user_id,
+            query=query,
+            topic=topic,
+            limit=3,
+            threshold=0.75
+        )
+        
+        # Format context
+        context_text = format_retrieved_context(similar_chats)
+        
+        return {
+            "context_text": context_text,
+            "similar_chats": similar_chats
+        }
+        
+    except Exception as e:
+        print(f"Error creating memory context: {e}")
+        return {"context_text": "", "similar_chats": []}
+    
+
+
+def store_conversation_memory(
+    user_id: str,
+    user_message: str,
+    ai_response: str,
+    topic: str,
+    session_id: str,
+    metadata: Optional[Dict] = None
+) -> bool:
+    """
+    Store conversation in Pinecone memory.
+    """
+    try:
+        from app.utils.pinecone_service import get_pinecone_service
+        
+        pinecone_service = get_pinecone_service()
+        if not pinecone_service:
+            return False
+        
+        # Prepare additional metadata
+        enhanced_metadata = {
+            "response_length": len(ai_response),
+            "has_code": "```" in ai_response,
+            "stored_at": datetime.now().isoformat()
+        }
+        
+        if metadata:
+            enhanced_metadata.update(metadata)
+        
+        # Store in Pinecone
+        vector_id = pinecone_service.store_chat_pair(
+            user_id=user_id,
+            user_message=user_message,
+            ai_response=ai_response,
+            topic=topic,
+            session_id=session_id,
+            metadata=enhanced_metadata
+        )
+        
+        return vector_id is not None
+        
+    except Exception as e:
+        print(f"Error storing conversation memory: {e}")
+        return False
