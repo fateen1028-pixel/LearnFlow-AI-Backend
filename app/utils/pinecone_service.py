@@ -1,63 +1,130 @@
 """
-pinecone_service.py
+pinecone_service.py - Graceful Pinecone service with fallback
 Handles Pinecone vector database operations for chat memory.
+If Pinecone fails, memory features will be disabled gracefully.
 """
 import os
 import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-import pinecone
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+# Flag to track if Pinecone is available
+PINECONE_AVAILABLE = False
+
+try:
+    # Try to import Pinecone with multiple strategies
+    import pinecone
+    
+    # Check if it's the new version
+    if hasattr(pinecone, 'Pinecone'):
+        from pinecone import Pinecone
+        PINECONE_AVAILABLE = True
+        print("✅ Pinecone v3+ detected and available")
+    else:
+        # Try to import the old way
+        import pinecone as pc
+        PINECONE_AVAILABLE = True
+        print("✅ Pinecone v2 detected and available")
+        
+except ImportError as e:
+    print(f"⚠️ Pinecone package not found: {e}")
+    PINECONE_AVAILABLE = False
+except Exception as e:
+    print(f"⚠️ Error importing Pinecone: {e}")
+    PINECONE_AVAILABLE = False
+
+# Initialize embeddings only if we have Google API key
+EMBEDDINGS_AVAILABLE = False
+embeddings = None
+
+try:
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+    
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    if google_api_key:
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001",
+            google_api_key=google_api_key
+        )
+        EMBEDDINGS_AVAILABLE = True
+        print("✅ Google Embeddings available")
+    else:
+        print("⚠️ GOOGLE_API_KEY not set, embeddings disabled")
+except ImportError as e:
+    print(f"⚠️ Google Generative AI not available: {e}")
+except Exception as e:
+    print(f"⚠️ Error initializing embeddings: {e}")
+
 
 class PineconeService:
-    """Service for Pinecone vector database operations."""
+    """Service for Pinecone vector database operations with graceful fallback."""
     
     def __init__(self):
-        """Initialize Pinecone and embeddings."""
-        self.api_key = os.getenv("PINECONE_API_KEY")
-        self.environment = os.getenv("PINECONE_ENVIRONMENT")
-        self.index_name = os.getenv("PINECONE_INDEX_NAME", "ai-learning-chat")
+        """Initialize Pinecone if available, otherwise use dummy mode."""
+        self.available = False
+        self.index = None
+        self.embeddings = embeddings
         
-        if not self.api_key or not self.environment:
-            raise ValueError("Pinecone API key and environment must be set")
+        # Check if we have the required API keys
+        pinecone_api_key = os.getenv("PINECONE_API_KEY")
+        if not pinecone_api_key:
+            print("⚠️ PINECONE_API_KEY not set, Pinecone disabled")
+            return
         
-        # Initialize Pinecone
-        pinecone.init(
-            api_key=self.api_key,
-            environment=self.environment
-        )
+        if not PINECONE_AVAILABLE:
+            print("⚠️ Pinecone package not available, Pinecone disabled")
+            return
         
-        # Initialize embeddings
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
-            google_api_key=os.getenv("GOOGLE_API_KEY")
-        )
+        if not EMBEDDINGS_AVAILABLE:
+            print("⚠️ Embeddings not available, Pinecone disabled")
+            return
         
-        # Create or connect to index
-        self.setup_index()
-        
-        # Get index reference
-        self.index = pinecone.Index(self.index_name)
-    
-    def setup_index(self):
-        """Create Pinecone index if it doesn't exist."""
-        if self.index_name not in pinecone.list_indexes():
-            # Create new index
-            pinecone.create_index(
-                name=self.index_name,
-                dimension=768,  # embedding-001 dimension
-                metric="cosine",
-                metadata_config={
-                    "indexed": ["user_id", "topic", "type", "session_id", "timestamp"]
-                }
-            )
-            print(f"Created new Pinecone index: {self.index_name}")
-        else:
-            print(f"Using existing Pinecone index: {self.index_name}")
+        try:
+            # Initialize Pinecone
+            self.pc = Pinecone(api_key=pinecone_api_key)
+            
+            # Set index name
+            self.index_name = os.getenv("PINECONE_INDEX_NAME", "ai-learning-chat")
+            
+            # Try to connect to index
+            try:
+                self.index = self.pc.Index(self.index_name)
+                print(f"✅ Connected to Pinecone index: {self.index_name}")
+                self.available = True
+            except Exception as e:
+                print(f"⚠️ Could not connect to index {self.index_name}: {e}")
+                # Try to create index
+                try:
+                    print(f"Attempting to create index: {self.index_name}")
+                    self.pc.create_index(
+                        name=self.index_name,
+                        dimension=768,
+                        metric="cosine"
+                    )
+                    # Wait a bit for index to be ready
+                    import time
+                    time.sleep(2)
+                    self.index = self.pc.Index(self.index_name)
+                    self.available = True
+                    print(f"✅ Created new index: {self.index_name}")
+                except Exception as create_error:
+                    print(f"❌ Failed to create index: {create_error}")
+                    self.available = False
+                    
+        except Exception as e:
+            print(f"❌ Failed to initialize Pinecone: {e}")
+            self.available = False
     
     def create_embedding(self, text: str) -> List[float]:
-        """Create embedding for text."""
-        return self.embeddings.embed_query(text)
+        """Create embedding for text or return zero vector."""
+        if not self.embeddings:
+            return [0.0] * 768
+        
+        try:
+            return self.embeddings.embed_query(text)
+        except Exception as e:
+            print(f"⚠️ Error creating embedding: {e}")
+            return [0.0] * 768
     
     def store_chat_pair(
         self, 
@@ -67,13 +134,17 @@ class PineconeService:
         topic: str,
         session_id: str,
         metadata: Optional[Dict] = None
-    ) -> str:
+    ) -> Optional[str]:
         """
         Store a Q/A pair in Pinecone.
-        Returns the vector ID.
+        Returns vector ID if successful, None otherwise.
         """
+        if not self.available or not self.index:
+            print("⚠️ Pinecone not available, skipping storage")
+            return None
+        
         try:
-            # Create embedding from the combined Q/A for better retrieval
+            # Create embedding
             combined_text = f"User: {user_message}\nAI: {ai_response}"
             embedding = self.create_embedding(combined_text)
             
@@ -83,8 +154,8 @@ class PineconeService:
             # Prepare metadata
             base_metadata = {
                 "user_id": str(user_id),
-                "user_message": user_message[:500],  # Limit length
-                "ai_response": ai_response[:1000],   # Limit length
+                "user_message": user_message[:500],
+                "ai_response": ai_response[:1000],
                 "topic": topic[:100],
                 "session_id": session_id,
                 "type": "chat_pair",
@@ -92,21 +163,24 @@ class PineconeService:
                 "text_length": len(combined_text)
             }
             
-            # Add custom metadata if provided
             if metadata:
                 base_metadata.update(metadata)
             
             # Store in Pinecone
             self.index.upsert(
-                vectors=[(vector_id, embedding, base_metadata)],
-                namespace=str(user_id)  # Namespace per user for isolation
+                vectors=[{
+                    "id": vector_id,
+                    "values": embedding,
+                    "metadata": base_metadata
+                }],
+                namespace=str(user_id)
             )
             
-            print(f"Stored chat pair for user {user_id}, vector_id: {vector_id}")
+            print(f"✅ Stored chat pair for user {user_id}")
             return vector_id
             
         except Exception as e:
-            print(f"Error storing chat pair: {e}")
+            print(f"❌ Error storing chat pair: {e}")
             return None
     
     def search_similar_chats(
@@ -120,6 +194,9 @@ class PineconeService:
         """
         Search for similar past chats for a user.
         """
+        if not self.available or not self.index:
+            return []
+        
         try:
             # Create embedding for the query
             query_embedding = self.create_embedding(query)
@@ -131,32 +208,32 @@ class PineconeService:
             
             # Query Pinecone
             results = self.index.query(
+                namespace=str(user_id),
                 vector=query_embedding,
                 top_k=limit,
                 filter=filter_dict,
-                include_metadata=True,
-                namespace=str(user_id)
+                include_metadata=True
             )
             
             # Process results
             similar_chats = []
-            for match in results.matches:
-                if match.score >= threshold:
-                    similar_chats.append({
-                        "id": match.id,
-                        "score": match.score,
-                        "user_message": match.metadata.get("user_message", ""),
-                        "ai_response": match.metadata.get("ai_response", ""),
-                        "topic": match.metadata.get("topic", ""),
-                        "timestamp": match.metadata.get("timestamp", ""),
-                        "metadata": match.metadata
-                    })
+            if hasattr(results, 'matches'):
+                for match in results.matches:
+                    if match.score >= threshold:
+                        similar_chats.append({
+                            "id": match.id,
+                            "score": match.score,
+                            "user_message": match.metadata.get("user_message", ""),
+                            "ai_response": match.metadata.get("ai_response", ""),
+                            "topic": match.metadata.get("topic", ""),
+                            "timestamp": match.metadata.get("timestamp", ""),
+                            "metadata": match.metadata
+                        })
             
-            print(f"Found {len(similar_chats)} similar chats for user {user_id}")
             return similar_chats
             
         except Exception as e:
-            print(f"Error searching similar chats: {e}")
+            print(f"⚠️ Error searching similar chats: {e}")
             return []
     
     def get_user_chat_history(
@@ -168,44 +245,45 @@ class PineconeService:
         """
         Get recent chat history for a user.
         """
+        if not self.available or not self.index:
+            return []
+        
         try:
-            # We'll use fetch with a timestamp filter, but Pinecone doesn't support ordering by timestamp
-            # For now, we'll use search with a zero vector to get all
+            # Use search with a zero vector
             filter_dict = {"user_id": str(user_id), "type": "chat_pair"}
             if topic:
                 filter_dict["topic"] = topic
             
-            # Use a zero vector for fetch-all (not ideal, but works)
             zero_vector = [0.0] * 768
             
             results = self.index.query(
+                namespace=str(user_id),
                 vector=zero_vector,
                 top_k=limit,
                 filter=filter_dict,
-                include_metadata=True,
-                namespace=str(user_id)
+                include_metadata=True
             )
             
-            # Sort by timestamp
+            # Process and sort
             chats = []
-            for match in results.matches:
-                chats.append({
-                    "id": match.id,
-                    "score": match.score,
-                    "user_message": match.metadata.get("user_message", ""),
-                    "ai_response": match.metadata.get("ai_response", ""),
-                    "topic": match.metadata.get("topic", ""),
-                    "timestamp": match.metadata.get("timestamp", ""),
-                    "metadata": match.metadata
-                })
+            if hasattr(results, 'matches'):
+                for match in results.matches:
+                    chats.append({
+                        "id": match.id,
+                        "score": match.score,
+                        "user_message": match.metadata.get("user_message", ""),
+                        "ai_response": match.metadata.get("ai_response", ""),
+                        "topic": match.metadata.get("topic", ""),
+                        "timestamp": match.metadata.get("timestamp", ""),
+                        "metadata": match.metadata
+                    })
             
-            # Sort by timestamp descending
+            # Sort by timestamp
             chats.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-            
             return chats[:limit]
             
         except Exception as e:
-            print(f"Error getting user chat history: {e}")
+            print(f"⚠️ Error getting user chat history: {e}")
             return []
     
     def delete_user_chats(
@@ -213,64 +291,84 @@ class PineconeService:
         user_id: str,
         vector_ids: Optional[List[str]] = None
     ) -> bool:
-        """
-        Delete specific chats or all chats for a user.
-        """
+        """Delete chats for a user."""
+        if not self.available or not self.index:
+            return False
+        
         try:
             if vector_ids:
-                # Delete specific vectors
                 self.index.delete(ids=vector_ids, namespace=str(user_id))
-                print(f"Deleted {len(vector_ids)} chats for user {user_id}")
             else:
-                # Delete all vectors for user (using namespace)
                 self.index.delete(delete_all=True, namespace=str(user_id))
-                print(f"Deleted all chats for user {user_id}")
-            
             return True
-            
         except Exception as e:
-            print(f"Error deleting chats: {e}")
+            print(f"⚠️ Error deleting chats: {e}")
             return False
     
     def get_stats(self, user_id: str) -> Dict:
         """Get statistics for user's chat memory."""
+        if not self.available:
+            return {"available": False, "total_chats": 0, "topics": {}}
+        
         try:
             chats = self.get_user_chat_history(user_id, limit=1000)
             
-            # Group by topic
             topics = {}
             for chat in chats:
                 topic = chat.get("topic", "unknown")
-                if topic not in topics:
-                    topics[topic] = 0
-                topics[topic] += 1
+                topics[topic] = topics.get(topic, 0) + 1
             
             return {
+                "available": True,
                 "total_chats": len(chats),
                 "topics": topics,
                 "oldest_chat": chats[-1]["timestamp"] if chats else None,
                 "newest_chat": chats[0]["timestamp"] if chats else None
             }
-            
         except Exception as e:
-            print(f"Error getting stats: {e}")
-            return {"total_chats": 0, "topics": {}}
+            print(f"⚠️ Error getting stats: {e}")
+            return {"available": False, "total_chats": 0, "topics": {}}
 
-# Singleton instance
-pinecone_service = None
 
-def get_pinecone_service():
-    """Get or create Pinecone service instance."""
-    global pinecone_service
-    if pinecone_service is None:
+# Global instance
+_pinecone_instance = None
+
+def get_pinecone_service() -> Optional[PineconeService]:
+    """Get the Pinecone service instance."""
+    global _pinecone_instance
+    
+    if _pinecone_instance is None:
         try:
-            pinecone_service = PineconeService()
+            _pinecone_instance = PineconeService()
         except Exception as e:
-            print(f"Failed to initialize Pinecone: {e}")
-            pinecone_service = None
-    return pinecone_service
+            print(f"❌ Failed to create PineconeService: {e}")
+            _pinecone_instance = None
+    
+    return _pinecone_instance
 
 def is_pinecone_available() -> bool:
-    """Check if Pinecone is configured and available."""
+    """Check if Pinecone is available and working."""
     service = get_pinecone_service()
-    return service is not None
+    return service is not None and service.available
+
+def get_memory_status() -> Dict:
+    """Get detailed memory system status."""
+    service = get_pinecone_service()
+    
+    if service is None:
+        return {
+            "available": False,
+            "reason": "Service not initialized",
+            "pinecone_installed": PINECONE_AVAILABLE,
+            "embeddings_available": EMBEDDINGS_AVAILABLE,
+            "api_key_set": bool(os.getenv("PINECONE_API_KEY"))
+        }
+    
+    return {
+        "available": service.available,
+        "pinecone_installed": PINECONE_AVAILABLE,
+        "embeddings_available": EMBEDDINGS_AVAILABLE,
+        "api_key_set": bool(os.getenv("PINECONE_API_KEY")),
+        "index_name": getattr(service, 'index_name', None),
+        "index_connected": service.index is not None
+    }

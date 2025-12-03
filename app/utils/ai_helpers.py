@@ -16,7 +16,7 @@ llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=gemini_api_key,
     temperature=0,
-    markdown=False
+    # markdown=False
 )
 
 search = DuckDuckGoSearchRun()
@@ -373,38 +373,21 @@ Question: {question}
 def extract_json_from_text(text: str) -> dict:
     """
     Safely extract and parse JSON from AI output.
-    - Removes ONLY outer code fences (```json ... ```).
-    - PRESERVES code fences inside JSON fields (so frontend styling stays correct).
-    - Fixes trailing commas, smart quotes, common model formatting errors.
     """
-
     if not text or not isinstance(text, str):
         return None
 
     text = text.strip()
 
-    # --------------------------------------------------
-    # 1. REMOVE ONLY OUTER CODE FENCES
-    #    (Do NOT remove code fences inside JSON strings)
-    # --------------------------------------------------
-    # Remove leading ```json or ```python
+    # Remove outer code fences
     text = re.sub(r'^```[\w\-]*\n?', '', text)
-
-    # Remove trailing ```
     text = re.sub(r'\n?```$', '', text)
-
-    # DO NOT USE text.replace("```", "")
-    # (this breaks code blocks inside JSON)
-
     text = text.strip()
 
-    # If Gemini sends: json { ... }
     if text.lower().startswith("json"):
         text = text[4:].strip()
 
-    # --------------------------------------------------
-    # 2. FIND JSON OBJECT BOUNDARIES
-    # --------------------------------------------------
+    # Find JSON object boundaries
     start = text.find("{")
     end = text.rfind("}")
 
@@ -412,41 +395,44 @@ def extract_json_from_text(text: str) -> dict:
         return None
 
     json_str = text[start:end + 1].strip()
-
-    # --------------------------------------------------
-    # 3. TRY DIRECT PARSE
-    # --------------------------------------------------
+    
+    # QUICK FIX: Escape apostrophes and newlines
+    # First, try to parse as-is
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
         pass
-
-    # --------------------------------------------------
-    # 4. FIX COMMON JSON ISSUES AND RETRY
-    # --------------------------------------------------
-
+    
+    # If that fails, try to fix common issues
+    # Escape apostrophes in string values
+    def escape_apostrophes(match):
+        content = match.group(1)
+        # Escape apostrophes
+        content = content.replace("'", "\\'")
+        return f'"{content}"'
+    
+    # Pattern to match string values (simplified)
+    json_str = re.sub(r'"([^"]*)"', escape_apostrophes, json_str)
+    
+    # Also escape newlines
+    json_str = json_str.replace('\n', '\\n').replace('\r', '\\r')
+    
     # Remove trailing commas
-    json_str = re.sub(r",\s*}", "}", json_str)
-    json_str = re.sub(r",\s*]", "]", json_str)
-
-    # Replace smart quotes
-    json_str = json_str.replace("“", '"').replace("”", '"')
-
-    # Fix escaped newlines/tabs
-    json_str = json_str.replace("\\n", "\n").replace("\\t", "\t")
-
-    # Remove illegal ASCII control characters
-    json_str = re.sub(r"[\x00-\x1F\x7F]", "", json_str)
-
-    # --------------------------------------------------
-    # 5. RETRY PARSING
-    # --------------------------------------------------
+    json_str = re.sub(r',\s*}', '}', json_str)
+    json_str = re.sub(r',\s*]', ']', json_str)
+    
     try:
         return json.loads(json_str)
     except json.JSONDecodeError as e:
-        print("JSON parse error:", e)
-        print("Failed JSON:", json_str[:300])
-        return None
+        print(f"JSON parse error: {e}")
+        # Last resort: return a minimal response
+        return {
+            "answer": text[start:end+1][:500] + "...",
+            "key_points": [],
+            "steps": [],
+            "examples": [],
+            "code_blocks": []
+        }
 
 
 
