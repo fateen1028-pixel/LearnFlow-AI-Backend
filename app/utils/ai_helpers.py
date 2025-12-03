@@ -138,39 +138,59 @@ Rules:
 
 # FIX: Removed ("system", ...) and merged instructions into the ("human", ...) message
 # as Gemini does not support the "system" role.
+# FIX: Enhanced prompt for better code generation
 task_qa_prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder(variable_name="chat_history"),
-    ("human", """You are a professional AI tutor. You MUST respond with ONLY valid JSON, no other text.
+    ("human", """You are a professional AI tutor and CODE EXPERT. You MUST respond with ONLY valid JSON, no other text.
 
 CRITICAL: Your entire response must be ONLY a JSON object. Do not write any text before or after the JSON.
 
-Required JSON structure:
+CODE GENERATION PRIORITY:
+- If user asks for code, you MUST provide COMPLETE, WORKING code
+- Use proper markdown code blocks with language specification
+- Include explanations BEFORE and AFTER code blocks
+- Make code PRACTICAL, RUNNABLE, and WELL-COMMENTED
+- Focus on IMPLEMENTATION, not just theory
+
+REQUIRED JSON structure for CODE REQUESTS:
 {{
-  "answer": "# Complete Answer\\n\\nFull explanation in Markdown with **bold**, code blocks, etc.",
+  "answer": "# Complete Answer with CODE\\n\\nExplanation of what the code does...\\n\\n```{language}\\n# COMPLETE CODE HERE\\ndef example():\\n    return 'Working code'\\n```\\n\\nExplanation of how it works...",
   "key_points": ["Point 1", "Point 2"],
-  "steps": ["Step 1", "Step 2"],
-  "examples": ["Example explanation"],
+  "steps": ["Step 1: Set up", "Step 2: Write function", "Step 3: Test"],
+  "examples": ["Code explanation"],
   "code_blocks": [
     {{
       "language": "{language}",
-      "code": "example code"
+      "code": "# Complete working code\\ndef main():\\n    print('Hello World')\\n\\nif __name__ == '__main__':\\n    main()"
     }}
   ]
 }}
 
-Instructions:
-- Use {language} for code (if 'auto', choose based on {topic})
-- Make answer field complete with Markdown formatting
-- CRITICAL: Return ONLY the JSON object, nothing else
+REQUIRED JSON structure for NON-CODE requests:
+{{
+  "answer": "# Complete Answer\\n\\nDetailed explanation...",
+  "key_points": ["Point 1", "Point 2"],
+  "steps": ["Step 1", "Step 2"],
+  "examples": ["Example 1", "Example 2"],
+  "code_blocks": []  # Empty array for non-code responses
+}}
+
+CRITICAL RULES:
+1. For code requests: code_blocks MUST contain at least ONE complete code snippet
+2. Use {language} for ALL code examples (if 'auto', choose appropriate language)
+3. Make answer field COMPLETE with Markdown formatting
+4. Code must be WELL-FORMATTED, INDENTED, and COMPLETE
+5. Include COMMENTS in code for clarity
+6. Provide REAL-WORLD examples when possible
+7. Return ONLY the JSON object, NOTHING ELSE
 
 Topic: {topic}
+Task Context: {tasks_context}
+Is Code Request: {is_code_request}
 
 ---
-Tasks: {tasks_context}
-
 Question: {question}""")
 ])
-
 
 refinement_prompt_template = PromptTemplate.from_template("""
 You must refine the given roadmap.
@@ -337,49 +357,83 @@ Question: {question}
 
 def extract_json_from_text(text: str) -> dict:
     """
-    Robust JSON extraction from text that might contain markdown or extra content.
+    Safely extract and parse JSON from AI output.
+    - Removes ONLY outer code fences (```json ... ```).
+    - PRESERVES code fences inside JSON fields (so frontend styling stays correct).
+    - Fixes trailing commas, smart quotes, common model formatting errors.
     """
-    if not text:
+
+    if not text or not isinstance(text, str):
         return None
-    
+
     text = text.strip()
-    
-    # Remove markdown JSON code blocks
-    json_block_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
-    json_block_match = re.search(json_block_pattern, text, re.IGNORECASE)
-    if json_block_match:
-        text = json_block_match.group(1).strip()
-    
-    # Remove leading/trailing backticks
-    text = text.strip('`').strip()
-    if text.lower().startswith('json'):
+
+    # --------------------------------------------------
+    # 1. REMOVE ONLY OUTER CODE FENCES
+    #    (Do NOT remove code fences inside JSON strings)
+    # --------------------------------------------------
+    # Remove leading ```json or ```python
+    text = re.sub(r'^```[\w\-]*\n?', '', text)
+
+    # Remove trailing ```
+    text = re.sub(r'\n?```$', '', text)
+
+    # DO NOT USE text.replace("```", "")
+    # (this breaks code blocks inside JSON)
+
+    text = text.strip()
+
+    # If Gemini sends: json { ... }
+    if text.lower().startswith("json"):
         text = text[4:].strip()
-    
-    # Find JSON object boundaries
-    first_brace = text.find('{')
-    last_brace = text.rfind('}')
-    
-    if first_brace == -1 or last_brace == -1:
+
+    # --------------------------------------------------
+    # 2. FIND JSON OBJECT BOUNDARIES
+    # --------------------------------------------------
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start == -1 or end == -1:
         return None
-    
-    json_str = text[first_brace:last_brace + 1]
-    
-    # Try to parse
+
+    json_str = text[start:end + 1].strip()
+
+    # --------------------------------------------------
+    # 3. TRY DIRECT PARSE
+    # --------------------------------------------------
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
-        # Try to fix common issues
-        # Remove trailing commas
-        json_str = re.sub(r',\s*}', '}', json_str)
-        json_str = re.sub(r',\s*]', ']', json_str)
-        
-        # Try again
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            print(f"JSON parse error: {e}")
-            print(f"Attempted to parse: {json_str[:500]}...")
-            return None
+        pass
+
+    # --------------------------------------------------
+    # 4. FIX COMMON JSON ISSUES AND RETRY
+    # --------------------------------------------------
+
+    # Remove trailing commas
+    json_str = re.sub(r",\s*}", "}", json_str)
+    json_str = re.sub(r",\s*]", "]", json_str)
+
+    # Replace smart quotes
+    json_str = json_str.replace("“", '"').replace("”", '"')
+
+    # Fix escaped newlines/tabs
+    json_str = json_str.replace("\\n", "\n").replace("\\t", "\t")
+
+    # Remove illegal ASCII control characters
+    json_str = re.sub(r"[\x00-\x1F\x7F]", "", json_str)
+
+    # --------------------------------------------------
+    # 5. RETRY PARSING
+    # --------------------------------------------------
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        print("JSON parse error:", e)
+        print("Failed JSON:", json_str[:300])
+        return None
+
+
 
 
 # -------------------------
@@ -387,61 +441,82 @@ def extract_json_from_text(text: str) -> dict:
 # -------------------------
 def run_chain(prompt, data):
     """
-    IMPROVED: Better error handling and JSON extraction
+    Ultra-stable chain executor for Gemini Flash.
+    Ensures:
+    - Always returns parsed JSON dict OR None
+    - Never crashes the backend
+    - Handles code fences and mixed text
     """
+
     try:
-        # Ensure data is a dict
+        # --------------------------------------
+        # 0. SANITIZE / PREPARE INPUT DATA
+        # --------------------------------------
         if data is None:
             data = {}
+
         if not isinstance(data, dict):
             try:
                 data = dict(data)
             except Exception:
                 data = {}
 
-        # Inject language if missing
+        # Inject language automatically
         if "language" not in data:
             topic = data.get("topic") or data.get("Topic") or ""
-            inferred = detect_language_from_topic(topic)
-            data["language"] = inferred
+            data["language"] = detect_language_from_topic(topic)
 
         # Ensure tasks_context exists
         if "tasks_context" not in data:
             data["tasks_context"] = "No specific tasks provided"
 
-        print(f"DEBUG: Invoking chain with keys: {list(data.keys())}")
-        
-        # Build and invoke chain
+        print(f"\n==============================")
+        print(f"RUN CHAIN → Prompt: {prompt}")
+        print(f"DATA KEYS → {list(data.keys())}")
+        print("==============================\n")
+
+        # --------------------------------------
+        # 1. EXECUTE THE MODEL
+        # --------------------------------------
         chain = prompt | llm
         response = chain.invoke(data)
-        
-        # Extract content
+
+        # Case A: LLM returned a dict already (rare)
         if isinstance(response, dict):
+            print("AI returned already-parsed dict ✔")
             return response
-        
-        if hasattr(response, 'content'):
-            content = str(response.content).strip()
+
+        # Case B: LLM returned a LangChain object with `.content`
+        if hasattr(response, "content"):
+            raw_text = str(response.content).strip()
         else:
-            content = str(response).strip()
-        
-        print(f"DEBUG: Raw response (first 500 chars): {content[:500]}")
-        
-        # Extract JSON
-        parsed = extract_json_from_text(content)
-        
-        if parsed:
-            print("DEBUG: Successfully extracted and parsed JSON")
+            raw_text = str(response).strip()
+
+        print("RAW RESPONSE (first 400 chars):")
+        print(raw_text[:400])
+        print("\n----------------------------------\n")
+
+        # --------------------------------------
+        # 2. TRY EXTRACTING JSON
+        # --------------------------------------
+        parsed = extract_json_from_text(raw_text)
+
+        if parsed is not None:
+            print("JSON successfully extracted ✔")
             return parsed
-        else:
-            print("DEBUG: Failed to extract valid JSON from response")
-            print(f"DEBUG: Full response: {content}")
-            return None
+
+        # --------------------------------------
+        # 3. FINAL FALLBACK
+        # --------------------------------------
+        print("❌ JSON extraction failed. Returning None.")
+        return None
 
     except Exception as e:
-        print(f"ERROR in run_chain: {e}")
+        print(f"\n❌ run_chain ERROR: {e}")
         import traceback
         traceback.print_exc()
         return None
+
     
 
 

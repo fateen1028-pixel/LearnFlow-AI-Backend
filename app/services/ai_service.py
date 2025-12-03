@@ -550,14 +550,42 @@ class AIService:
 
     @staticmethod
     def handle_regular_chat(data):
-        """Enhanced regular chat implementation with code generation support"""
+        """Enhanced regular chat implementation with STRONG code generation support"""
         message = data.get("message")
-        topic = data.get("topic")  # FIX: Get topic from data
+        topic = data.get("topic")
         tasks = data.get("tasks", [])
         chat_history = data.get("chatHistory", [])
         user_understanding = data.get("userUnderstanding", {})
         
         print(f"DEBUG: handle_regular_chat - Topic: {topic}, Message: {message[:50]}...")
+        
+        # STRONG CODE REQUEST DETECTION
+        is_code_request = any(keyword in message.lower() for keyword in [
+            'generate', 'write', 'create', 'code', 'function', 'program', 
+            'script', 'example', 'show me', 'how to', 'implement', 'demonstrate',
+            'sample', 'snippet', 'write a', 'make a', 'build a', 'develop a'
+        ])
+        
+        # ENHANCED PROMPT FOR CODE GENERATION
+        if is_code_request:
+            enhanced_message = f"""
+    CODE GENERATION REQUEST - HIGH PRIORITY!
+
+    The user is explicitly asking for CODE. Please provide:
+
+    1. COMPLETE, WORKING CODE with proper syntax
+    2. Use markdown code blocks with language specification (```python, ```javascript, etc.)
+    3. Include detailed explanations BEFORE and AFTER the code
+    4. Make the code PRACTICAL and RUNNABLE
+    5. Use the "code_blocks" field to provide extracted code snippets
+    6. Focus on implementation, not just theory
+
+    User's original request: {message}
+
+    IMPORTANT: Your response MUST include working code examples!
+    """
+        else:
+            enhanced_message = message
         
         # Create context from tasks
         tasks_context = ""
@@ -577,16 +605,18 @@ class AIService:
                 history_messages.append(AIMessage(content=msg.get('text', '')))
         
         try:
-            # FIX: Prepare the prompt data with ALL required fields including topic
+            # Prepare the prompt data with ALL required fields
             prompt_data = {
                 "tasks_context": tasks_context,
-                "question": message,
-                "topic": topic,  # CRITICAL FIX: Add topic
-                "language": detect_language_from_topic(topic),  # CRITICAL FIX: Add language
-                "chat_history": history_messages
+                "question": enhanced_message,
+                "topic": topic,
+                "language": detect_language_from_topic(topic),
+                "chat_history": history_messages,
+                "is_code_request": is_code_request  # Add flag for code generation
             }
             
-            print(f"DEBUG: Invoking chain with keys: {list(prompt_data.keys())}")
+            print(f"DEBUG: Code request detected: {is_code_request}")
+            print(f"DEBUG: Invoking chain with enhanced prompt")
             
             response = run_chain(task_qa_prompt, prompt_data)
             
@@ -594,21 +624,38 @@ class AIService:
                 print("DEBUG: AI returned None response")
                 raise Exception("AI did not return valid JSON")
             
-            print(f"DEBUG: AI response keys: {response.keys() if isinstance(response, dict) else 'not a dict'}")
+            print(f"DEBUG: AI response type: {type(response)}")
             
             # Extract the answer from the structured response
             response_text = response.get("answer", "")
             if not response_text:
-                print("DEBUG: No 'answer' field, trying other fields")
                 response_text = response.get("markdown", "") or response.get("text", "") or str(response)
             
             # Get code blocks from response
             code_blocks = response.get("code_blocks", [])
             
-            # If there are markdown code blocks in text, extract them
-            processed = enhanced_process_ai_response(response_text)
-            if processed and processed.get("code_blocks"):
-                code_blocks = processed.get("code_blocks")
+            # ENHANCED: If no code blocks but code is in text, extract them
+            if (not code_blocks or len(code_blocks) == 0) and '```' in response_text:
+                print("DEBUG: Extracting code blocks from markdown text")
+                processed = enhanced_process_ai_response(response_text)
+                if processed and processed.get("code_blocks"):
+                    code_blocks = processed.get("code_blocks")
+                    print(f"DEBUG: Extracted {len(code_blocks)} code blocks")
+            
+            # ENHANCED: Ensure code blocks have proper language
+            for block in code_blocks:
+                if block.get("language") in ["auto", "", None]:
+                    block["language"] = detect_language_from_topic(topic)
+            
+            # ENHANCED: If it's a code request but no code blocks, create fallback
+            if is_code_request and len(code_blocks) == 0:
+                print("DEBUG: Code request but no code blocks found, creating fallback")
+                # Add default code block based on topic
+                default_language = detect_language_from_topic(topic)
+                code_blocks = [{
+                    "language": default_language,
+                    "code": f"# Default code example for {topic}\n# Please rephrase your request for more specific code."
+                }]
             
             # Calculate understanding update
             understanding_update = AIService.calculate_understanding_update(
@@ -621,10 +668,11 @@ class AIService:
                 "status": "success",
                 "response": {
                     "text": response_text,
-                    "type": "general",
+                    "type": "code" if is_code_request else "general",
                     "understandingUpdate": understanding_update,
                     "search_used": False,
-                    "code_blocks": code_blocks
+                    "code_blocks": code_blocks,
+                    "is_code_response": is_code_request and len(code_blocks) > 0
                 }
             }
             
@@ -632,6 +680,36 @@ class AIService:
             print(f"Regular chat error: {e}")
             import traceback
             traceback.print_exc()
+            
+            # Fallback for code requests
+            if is_code_request:
+                default_language = detect_language_from_topic(topic)
+                fallback_code = f"""# Example code for {topic}
+
+    # This is a sample implementation
+    def example_function():
+        # Your code here
+        return "Hello World"
+
+    # Usage
+    result = example_function()
+    print(result)"""
+                
+                return {
+                    "status": "success",
+                    "response": {
+                        "text": f"I'll help you with code for {topic}. Here's an example:\n\n```{default_language}\n{fallback_code}\n```",
+                        "type": "code",
+                        "understandingUpdate": user_understanding,
+                        "search_used": False,
+                        "code_blocks": [{
+                            "language": default_language,
+                            "code": fallback_code
+                        }],
+                        "is_code_response": True
+                    }
+                }
+            
             return {
                 "status": "error", 
                 "message": f"Failed to process request: {str(e)}"
