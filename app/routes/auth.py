@@ -1,6 +1,8 @@
 from flask import Blueprint, request, jsonify
 from app.services.auth_service import AuthService
 from app.utils.validators import validate_email_password
+import re
+from app.utils.helpers import get_db, get_jwt_secret
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -79,7 +81,6 @@ def debug_firebase():
 
 @auth_bp.route("/auth/forgot-password", methods=["POST"])
 def forgot_password():
-    """Initiate password reset process"""
     data = request.json
     if not data:
         return jsonify({"status": "error", "message": "No JSON data provided"}), 400
@@ -88,39 +89,72 @@ def forgot_password():
     if not email:
         return jsonify({"status": "error", "message": "Email is required"}), 400
     
+    import re
     if not re.match(r'^[^@]+@[^@]+\.[^@]+$', email):
         return jsonify({"status": "error", "message": "Invalid email format"}), 400
     
-    result = AuthService.initiate_password_reset(email)
+    db = get_db()
+    user = db.users.find_one({"email": email})
     
-    if isinstance(result, tuple):
-        return jsonify(result[0]), result[1]
-    return jsonify(result)
+    if not user:
+        return jsonify({"status": "error", "message": "User not found"}), 404
+
+    from app.services.email_service import EmailService
+    
+    # Generate PIN
+    pin = EmailService.generate_pin()
+
+    # Store PIN (using ObjectId)
+    EmailService.create_pin_entry(user["_id"], pin)
+
+    # Send via email
+    EmailService.send_password_reset_pin(email, pin)
+
+    return jsonify({"status": "success", "message": "Password reset PIN sent"}), 200
+
+
 
 @auth_bp.route("/auth/reset-password", methods=["POST"])
 def reset_password():
-    """Reset password using token"""
     data = request.json
     if not data:
         return jsonify({"status": "error", "message": "No JSON data provided"}), 400
     
-    token = data.get('token')
+    email = data.get('email')
+    pin = data.get('pin')
     new_password = data.get('password')
     
-    if not token:
-        return jsonify({"status": "error", "message": "Reset token is required"}), 400
-    
-    if not new_password:
-        return jsonify({"status": "error", "message": "New password is required"}), 400
+    if not email or not pin or not new_password:
+        return jsonify({"status": "error", "message": "Email, PIN, and new password are required"}), 400
     
     if len(new_password) < 6:
         return jsonify({"status": "error", "message": "Password must be at least 6 characters"}), 400
     
-    result = AuthService.reset_password(token, new_password)
+    db = get_db()
+    user = db.users.find_one({"email": email})
+    if not user:
+        return jsonify({"status": "error", "message": "User not found"}), 404
     
-    if isinstance(result, tuple):
-        return jsonify(result[0]), result[1]
-    return jsonify(result)
+    from bson import ObjectId
+    from app.services.email_service import EmailService
+
+    # Verify PIN
+    if not EmailService.verify_pin(ObjectId(user["_id"]), pin):
+        return jsonify({"status": "error", "message": "Invalid or expired PIN"}), 400
+    
+    # Hash password with bcrypt (CONSISTENT WITH auth_service.py)
+    import bcrypt
+    hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+
+    # Update user
+    db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password": hashed}}
+    )
+
+    return jsonify({"status": "success", "message": "Password reset successfully"})
+
+
 
 @auth_bp.route("/auth/verify-reset-token", methods=["POST"])
 def verify_reset_token():

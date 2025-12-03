@@ -51,21 +51,32 @@ class AuthService:
                 "message": "This account uses Google authentication. Please sign in with Google."
             }, 401
 
+        # Handle both bytes and string password storage
+        stored_password = user['password']
+        
+        # If password is stored as string, convert to bytes
+        if isinstance(stored_password, str):
+            stored_password = stored_password.encode('utf-8')
+        
         # Check password
-        if bcrypt.checkpw(password.encode('utf-8'), user['password']):
-            token = jwt.encode({
-                'user_id': str(user['_id']),
-                'exp': datetime.utcnow() + timedelta(hours=24)
-            }, get_jwt_secret(), algorithm="HS256")
+        try:
+            if bcrypt.checkpw(password.encode('utf-8'), stored_password):
+                token = jwt.encode({
+                    'user_id': str(user['_id']),
+                    'exp': datetime.utcnow() + timedelta(hours=24)
+                }, get_jwt_secret(), algorithm="HS256")
 
-            return {
-                "status": "success",
-                "message": "Login successful",
-                "token": token,
-                "user": User.get_public_user_data(user)
-            }
-        else:
-            return {"status": "error", "message": "Invalid credentials"}, 401
+                return {
+                    "status": "success",
+                    "message": "Login successful",
+                    "token": token,
+                    "user": User.get_public_user_data(user)
+                }
+            else:
+                return {"status": "error", "message": "Invalid credentials"}, 401
+        except Exception as e:
+            print(f"❌ Password check error: {str(e)}")
+            return {"status": "error", "message": "Authentication error"}, 500
 
     @staticmethod
     def authenticate_firebase_user(firebase_token):
