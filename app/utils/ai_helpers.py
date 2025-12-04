@@ -7,6 +7,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, Prom
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import JsonOutputParser
+from datetime import datetime
+from typing import List, Dict, Any, Optional
 
 # LLM Setup
 gemini_api_key = os.getenv("GOOGLE_API_KEY")
@@ -14,7 +16,7 @@ llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=gemini_api_key,
     temperature=0,
-    markdown=False
+    # markdown=False
 )
 
 search = DuckDuckGoSearchRun()
@@ -152,15 +154,24 @@ CODE GENERATION PRIORITY:
 - Make code PRACTICAL, RUNNABLE, and WELL-COMMENTED
 - Focus on IMPLEMENTATION, not just theory
 
+PAST CONVERSATIONS CONTEXT:
+{memory_context}
+
+IMPORTANT: When using past conversations:
+1. Reference them naturally if relevant
+2. Build upon previous explanations
+3. Don't repeat the same answer word-for-word
+4. Update or correct if new information is available
+
 REQUIRED JSON structure for CODE REQUESTS:
 {{
-  "answer": "# Complete Answer with CODE\\n\\nExplanation of what the code does...\\n\\n```{language}\\n# COMPLETE CODE HERE\\ndef example():\\n    return 'Working code'\\n```\\n\\nExplanation of how it works...",
+  "answer": "# Complete Answer with CODE\\n\\nExplanation of what the code does...\\n\\n```{{language}}\\n# COMPLETE CODE HERE\\ndef example():\\n    return 'Working code'\\n```\\n\\nExplanation of how it works...",
   "key_points": ["Point 1", "Point 2"],
   "steps": ["Step 1: Set up", "Step 2: Write function", "Step 3: Test"],
   "examples": ["Code explanation"],
   "code_blocks": [
     {{
-      "language": "{language}",
+      "language": "{{language}}",
       "code": "# Complete working code\\ndef main():\\n    print('Hello World')\\n\\nif __name__ == '__main__':\\n    main()"
     }}
   ]
@@ -177,7 +188,7 @@ REQUIRED JSON structure for NON-CODE requests:
 
 CRITICAL RULES:
 1. For code requests: code_blocks MUST contain at least ONE complete code snippet
-2. Use {language} for ALL code examples (if 'auto', choose appropriate language)
+2. Use {{language}} for ALL code examples (if 'auto', choose appropriate language)
 3. Make answer field COMPLETE with Markdown formatting
 4. Code must be WELL-FORMATTED, INDENTED, and COMPLETE
 5. Include COMMENTS in code for clarity
@@ -321,25 +332,29 @@ Return ONLY the JSON object, nothing else.""")
 search_enhanced_prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", """
-You are an expert tutor with access to search results.
+You are an expert tutor with access to search results and past conversations.
+
+PAST CONVERSATIONS CONTEXT:
+{memory_context}
 
 Return ONLY valid JSON with:
 
-{
+{{
   "answer": "Full explanation",
   "key_points": ["Point 1", "Point 2"],
-  "updated_understanding": {"concept": 60},
+  "updated_understanding": {{"concept": 60}},
   "resources": [
-    {
+    {{
       "title": "Resource",
       "url": "https://example.com",
       "type": "video/article/tool"
-    }
+    }}
   ]
-}
+}}
 
 Rules:
 - Use search results only inside the JSON.
+- Reference past conversations if relevant.
 - No markdown.
 - No text outside JSON.
 
@@ -358,38 +373,21 @@ Question: {question}
 def extract_json_from_text(text: str) -> dict:
     """
     Safely extract and parse JSON from AI output.
-    - Removes ONLY outer code fences (```json ... ```).
-    - PRESERVES code fences inside JSON fields (so frontend styling stays correct).
-    - Fixes trailing commas, smart quotes, common model formatting errors.
     """
-
     if not text or not isinstance(text, str):
         return None
 
     text = text.strip()
 
-    # --------------------------------------------------
-    # 1. REMOVE ONLY OUTER CODE FENCES
-    #    (Do NOT remove code fences inside JSON strings)
-    # --------------------------------------------------
-    # Remove leading ```json or ```python
+    # Remove outer code fences
     text = re.sub(r'^```[\w\-]*\n?', '', text)
-
-    # Remove trailing ```
     text = re.sub(r'\n?```$', '', text)
-
-    # DO NOT USE text.replace("```", "")
-    # (this breaks code blocks inside JSON)
-
     text = text.strip()
 
-    # If Gemini sends: json { ... }
     if text.lower().startswith("json"):
         text = text[4:].strip()
 
-    # --------------------------------------------------
-    # 2. FIND JSON OBJECT BOUNDARIES
-    # --------------------------------------------------
+    # Find JSON object boundaries
     start = text.find("{")
     end = text.rfind("}")
 
@@ -397,41 +395,44 @@ def extract_json_from_text(text: str) -> dict:
         return None
 
     json_str = text[start:end + 1].strip()
-
-    # --------------------------------------------------
-    # 3. TRY DIRECT PARSE
-    # --------------------------------------------------
+    
+    # QUICK FIX: Escape apostrophes and newlines
+    # First, try to parse as-is
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
         pass
-
-    # --------------------------------------------------
-    # 4. FIX COMMON JSON ISSUES AND RETRY
-    # --------------------------------------------------
-
+    
+    # If that fails, try to fix common issues
+    # Escape apostrophes in string values
+    def escape_apostrophes(match):
+        content = match.group(1)
+        # Escape apostrophes
+        content = content.replace("'", "\\'")
+        return f'"{content}"'
+    
+    # Pattern to match string values (simplified)
+    json_str = re.sub(r'"([^"]*)"', escape_apostrophes, json_str)
+    
+    # Also escape newlines
+    json_str = json_str.replace('\n', '\\n').replace('\r', '\\r')
+    
     # Remove trailing commas
-    json_str = re.sub(r",\s*}", "}", json_str)
-    json_str = re.sub(r",\s*]", "]", json_str)
-
-    # Replace smart quotes
-    json_str = json_str.replace("“", '"').replace("”", '"')
-
-    # Fix escaped newlines/tabs
-    json_str = json_str.replace("\\n", "\n").replace("\\t", "\t")
-
-    # Remove illegal ASCII control characters
-    json_str = re.sub(r"[\x00-\x1F\x7F]", "", json_str)
-
-    # --------------------------------------------------
-    # 5. RETRY PARSING
-    # --------------------------------------------------
+    json_str = re.sub(r',\s*}', '}', json_str)
+    json_str = re.sub(r',\s*]', ']', json_str)
+    
     try:
         return json.loads(json_str)
     except json.JSONDecodeError as e:
-        print("JSON parse error:", e)
-        print("Failed JSON:", json_str[:300])
-        return None
+        print(f"JSON parse error: {e}")
+        # Last resort: return a minimal response
+        return {
+            "answer": text[start:end+1][:500] + "...",
+            "key_points": [],
+            "steps": [],
+            "examples": [],
+            "code_blocks": []
+        }
 
 
 
@@ -920,3 +921,283 @@ def extract_concepts_with_context(text, main_topic):
             unique_concepts.append(concept)
 
     return unique_concepts[:6]
+
+
+
+def format_retrieved_context(similar_chats: List[Dict]) -> str:
+    """
+    Format retrieved similar chats into context string.
+    """
+    if not similar_chats:
+        return ""
+    
+    context_lines = ["\n\n## 📚 Relevant Past Conversations:"]
+    
+    for i, chat in enumerate(similar_chats, 1):
+        user_msg = chat.get("user_message", "").strip()
+        ai_resp = chat.get("ai_response", "").strip()
+        score = chat.get("score", 0)
+        chat_topic = chat.get("topic", "general")
+        
+        if user_msg and ai_resp:
+            # Truncate if too long
+            if len(user_msg) > 150:
+                user_msg = user_msg[:150] + "..."
+            if len(ai_resp) > 200:
+                ai_resp = ai_resp[:200] + "..."
+            
+            context_lines.append(f"\n{i}. **{chat_topic.upper()}** (Relevance: {score:.1%})")
+            context_lines.append(f"   **User**: {user_msg}")
+            context_lines.append(f"   **AI**: {ai_resp}")
+    
+    context_lines.append("\n---")
+    return "\n".join(context_lines)
+
+def create_memory_context(
+    query: str, 
+    user_id: str, 
+    topic: str, 
+    use_memory: bool = True
+) -> Dict[str, Any]:
+    """
+    Create context from memory if available.
+    Returns: dict with context_text and similar_chats
+    
+    Enhanced with:
+    1. Personal query detection (lower threshold, no topic filter)
+    2. Fallback search strategies
+    3. Better debugging
+    """
+    if not use_memory:
+        return {"context_text": "", "similar_chats": []}
+    
+    try:
+        from app.utils.pinecone_service import get_pinecone_service
+        
+        pinecone_service = get_pinecone_service()
+        if not pinecone_service:
+            print("⚠️ Pinecone service not available for memory context")
+            return {"context_text": "", "similar_chats": []}
+        
+        if not pinecone_service.available:
+            print("⚠️ Pinecone service not available (available=False)")
+            return {"context_text": "", "similar_chats": []}
+        
+        print(f"🔍 CREATE MEMORY CONTEXT - User: {user_id}, Query: '{query[:100]}...'")
+        print(f"   Topic: {topic}")
+        
+        # -------------------------
+        # 1. DETECT QUERY TYPE
+        # -------------------------
+        query_lower = query.lower()
+        
+        # Personal/context queries
+        personal_keywords = [
+            "my name", "who am i", "remember me", "i am ", "call me",
+            "do you know", "can you recall", "have we talked", "previous conversation",
+            "before", "earlier", "last time"
+        ]
+        
+        # Code/technical queries  
+        code_keywords = [
+            "code", "function", "class", "method", "import", "def ",
+            "javascript", "python", "java", "c++", "html", "css",
+            "example", "syntax", "error", "debug", "fix", "how to"
+        ]
+        
+        # Conceptual/theory queries
+        concept_keywords = [
+            "what is", "explain", "define", "meaning of", "understand",
+            "concept", "theory", "principle", "basics", "fundamentals"
+        ]
+        
+        is_personal = any(keyword in query_lower for keyword in personal_keywords)
+        is_code = any(keyword in query_lower for keyword in code_keywords)
+        is_concept = any(keyword in query_lower for keyword in concept_keywords)
+        
+        print(f"   Query type - Personal: {is_personal}, Code: {is_code}, Concept: {is_concept}")
+        
+        # -------------------------
+        # 2. SET SEARCH PARAMETERS
+        # -------------------------
+        search_topic = topic
+        search_threshold = 0.75
+        search_limit = 3
+        
+        if is_personal:
+            # Personal queries: lower threshold, no topic filter
+            search_topic = None
+            search_threshold = 0.4  # Very low for personal context
+            search_limit = 5  # More results
+            print(f"   Using PERSONAL search: topic=None, threshold={search_threshold}")
+            
+        elif is_code:
+            # Code queries: higher threshold, topic filter
+            search_threshold = 0.8  # Higher for code similarity
+            print(f"   Using CODE search: threshold={search_threshold}")
+            
+        elif is_concept:
+            # Concept queries: moderate threshold
+            search_threshold = 0.7
+            print(f"   Using CONCEPT search: threshold={search_threshold}")
+        
+        # -------------------------
+        # 3. PERFORM SEARCH WITH STRATEGY
+        # -------------------------
+        similar_chats = []
+        
+        # Strategy 1: Try with topic filter first (unless it's personal)
+        if search_topic and not is_personal:
+            print(f"   Strategy 1: Searching WITH topic filter '{search_topic}'")
+            similar_chats = pinecone_service.search_similar_chats(
+                user_id=user_id,
+                query=query,
+                topic=search_topic,
+                limit=search_limit,
+                threshold=search_threshold
+            )
+            
+            if similar_chats:
+                print(f"   ✅ Found {len(similar_chats)} chats with topic filter")
+        
+        # Strategy 2: If no results or personal query, try without topic filter
+        if not similar_chats and search_threshold > 0.3:
+            # Lower threshold for second attempt
+            fallback_threshold = max(0.3, search_threshold - 0.2)
+            print(f"   Strategy 2: Searching WITHOUT topic filter, threshold={fallback_threshold}")
+            
+            similar_chats = pinecone_service.search_similar_chats(
+                user_id=user_id,
+                query=query,
+                topic=None,  # No topic filter
+                limit=search_limit,
+                threshold=fallback_threshold
+            )
+            
+            if similar_chats:
+                print(f"   ✅ Found {len(similar_chats)} chats without topic filter")
+        
+        # Strategy 3: Last resort - very low threshold search for any context
+        if not similar_chats and not is_personal:
+            print(f"   Strategy 3: Very low threshold search (0.2)")
+            similar_chats = pinecone_service.search_similar_chats(
+                user_id=user_id,
+                query=query,
+                topic=None,
+                limit=search_limit,
+                threshold=0.2
+            )
+            
+            if similar_chats:
+                print(f"   ⚠️ Found {len(similar_chats)} with very low threshold")
+        
+        # -------------------------
+        # 4. DEBUG: Show what we found
+        # -------------------------
+        if similar_chats:
+            print(f"   📊 Search results summary:")
+            for i, chat in enumerate(similar_chats):
+                score = chat.get("score", 0)
+                chat_topic = chat.get("topic", "unknown")
+                user_msg = chat.get("user_message", "")[:50]
+                print(f"     {i+1}. Score: {score:.4f}, Topic: {chat_topic}")
+                print(f"        User: {user_msg}...")
+        else:
+            print(f"   ❌ No similar chats found with any strategy")
+            
+            # Let's see what's in the index for this user
+            try:
+                history = pinecone_service.get_user_chat_history(
+                    user_id=user_id,
+                    limit=5,
+                    topic=None
+                )
+                if history:
+                    print(f"   ℹ️ User has {len(history)} total stored chats:")
+                    for i, chat in enumerate(history):
+                        chat_topic = chat.get("topic", "unknown")
+                        user_msg = chat.get("user_message", "")[:50]
+                        print(f"     {i+1}. Topic: {chat_topic}, User: {user_msg}...")
+                else:
+                    print(f"   ℹ️ User has no stored chats")
+            except Exception as debug_e:
+                print(f"   ℹ️ Could not get user history: {debug_e}")
+        
+        # -------------------------
+        # 5. FORMAT CONTEXT
+        # -------------------------
+        context_text = format_retrieved_context(similar_chats)
+        
+        if context_text:
+            print(f"   ✅ Memory context created ({len(similar_chats)} chats)")
+        else:
+            print(f"   ℹ️ No memory context available")
+        
+        return {
+            "context_text": context_text,
+            "similar_chats": similar_chats,
+            "search_debug": {
+                "is_personal": is_personal,
+                "is_code": is_code,
+                "is_concept": is_concept,
+                "original_threshold": 0.75,
+                "used_threshold": search_threshold,
+                "used_topic_filter": search_topic is not None,
+                "found_chats": len(similar_chats)
+            }
+        }
+        
+    except ImportError as e:
+        print(f"❌ Import error in create_memory_context: {e}")
+        return {"context_text": "", "similar_chats": []}
+    except Exception as e:
+        print(f"❌ Error in create_memory_context: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"context_text": "", "similar_chats": []}
+    
+
+
+def store_conversation_memory(
+    user_id: str,
+    user_message: str,
+    ai_response: str,
+    topic: str,
+    session_id: str,
+    metadata: Optional[Dict] = None
+) -> bool:
+    """
+    Store conversation in Pinecone memory.
+    """
+    try:
+        from app.utils.pinecone_service import get_pinecone_service
+        
+        pinecone_service = get_pinecone_service()
+        if not pinecone_service:
+            return False
+        
+        # Prepare additional metadata
+        enhanced_metadata = {
+            "response_length": len(ai_response),
+            "has_code": "```" in ai_response,
+            "stored_at": datetime.now().isoformat()
+        }
+        
+        if metadata:
+            enhanced_metadata.update(metadata)
+        
+        # Store in Pinecone
+        vector_id = pinecone_service.store_chat_pair(
+            user_id=user_id,
+            user_message=user_message,
+            ai_response=ai_response,
+            topic=topic,
+            session_id=session_id,
+            metadata=enhanced_metadata
+        )
+        
+        return vector_id is not None
+        
+    except Exception as e:
+        print(f"Error storing conversation memory: {e}")
+        return False
