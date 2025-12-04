@@ -936,20 +936,22 @@ def format_retrieved_context(similar_chats: List[Dict]) -> str:
     for i, chat in enumerate(similar_chats, 1):
         user_msg = chat.get("user_message", "").strip()
         ai_resp = chat.get("ai_response", "").strip()
+        score = chat.get("score", 0)
+        chat_topic = chat.get("topic", "general")
         
         if user_msg and ai_resp:
             # Truncate if too long
-            if len(user_msg) > 200:
-                user_msg = user_msg[:200] + "..."
-            if len(ai_resp) > 300:
-                ai_resp = ai_resp[:300] + "..."
+            if len(user_msg) > 150:
+                user_msg = user_msg[:150] + "..."
+            if len(ai_resp) > 200:
+                ai_resp = ai_resp[:200] + "..."
             
-            context_lines.append(f"\n{i}. **User**: {user_msg}")
+            context_lines.append(f"\n{i}. **{chat_topic.upper()}** (Relevance: {score:.1%})")
+            context_lines.append(f"   **User**: {user_msg}")
             context_lines.append(f"   **AI**: {ai_resp}")
     
     context_lines.append("\n---")
     return "\n".join(context_lines)
-
 
 def create_memory_context(
     query: str, 
@@ -960,6 +962,11 @@ def create_memory_context(
     """
     Create context from memory if available.
     Returns: dict with context_text and similar_chats
+    
+    Enhanced with:
+    1. Personal query detection (lower threshold, no topic filter)
+    2. Fallback search strategies
+    3. Better debugging
     """
     if not use_memory:
         return {"context_text": "", "similar_chats": []}
@@ -969,27 +976,184 @@ def create_memory_context(
         
         pinecone_service = get_pinecone_service()
         if not pinecone_service:
+            print("⚠️ Pinecone service not available for memory context")
             return {"context_text": "", "similar_chats": []}
         
-        # Search for similar past chats
-        similar_chats = pinecone_service.search_similar_chats(
-            user_id=user_id,
-            query=query,
-            topic=topic,
-            limit=3,
-            threshold=0.75
-        )
+        if not pinecone_service.available:
+            print("⚠️ Pinecone service not available (available=False)")
+            return {"context_text": "", "similar_chats": []}
         
-        # Format context
+        print(f"🔍 CREATE MEMORY CONTEXT - User: {user_id}, Query: '{query[:100]}...'")
+        print(f"   Topic: {topic}")
+        
+        # -------------------------
+        # 1. DETECT QUERY TYPE
+        # -------------------------
+        query_lower = query.lower()
+        
+        # Personal/context queries
+        personal_keywords = [
+            "my name", "who am i", "remember me", "i am ", "call me",
+            "do you know", "can you recall", "have we talked", "previous conversation",
+            "before", "earlier", "last time"
+        ]
+        
+        # Code/technical queries  
+        code_keywords = [
+            "code", "function", "class", "method", "import", "def ",
+            "javascript", "python", "java", "c++", "html", "css",
+            "example", "syntax", "error", "debug", "fix", "how to"
+        ]
+        
+        # Conceptual/theory queries
+        concept_keywords = [
+            "what is", "explain", "define", "meaning of", "understand",
+            "concept", "theory", "principle", "basics", "fundamentals"
+        ]
+        
+        is_personal = any(keyword in query_lower for keyword in personal_keywords)
+        is_code = any(keyword in query_lower for keyword in code_keywords)
+        is_concept = any(keyword in query_lower for keyword in concept_keywords)
+        
+        print(f"   Query type - Personal: {is_personal}, Code: {is_code}, Concept: {is_concept}")
+        
+        # -------------------------
+        # 2. SET SEARCH PARAMETERS
+        # -------------------------
+        search_topic = topic
+        search_threshold = 0.75
+        search_limit = 3
+        
+        if is_personal:
+            # Personal queries: lower threshold, no topic filter
+            search_topic = None
+            search_threshold = 0.4  # Very low for personal context
+            search_limit = 5  # More results
+            print(f"   Using PERSONAL search: topic=None, threshold={search_threshold}")
+            
+        elif is_code:
+            # Code queries: higher threshold, topic filter
+            search_threshold = 0.8  # Higher for code similarity
+            print(f"   Using CODE search: threshold={search_threshold}")
+            
+        elif is_concept:
+            # Concept queries: moderate threshold
+            search_threshold = 0.7
+            print(f"   Using CONCEPT search: threshold={search_threshold}")
+        
+        # -------------------------
+        # 3. PERFORM SEARCH WITH STRATEGY
+        # -------------------------
+        similar_chats = []
+        
+        # Strategy 1: Try with topic filter first (unless it's personal)
+        if search_topic and not is_personal:
+            print(f"   Strategy 1: Searching WITH topic filter '{search_topic}'")
+            similar_chats = pinecone_service.search_similar_chats(
+                user_id=user_id,
+                query=query,
+                topic=search_topic,
+                limit=search_limit,
+                threshold=search_threshold
+            )
+            
+            if similar_chats:
+                print(f"   ✅ Found {len(similar_chats)} chats with topic filter")
+        
+        # Strategy 2: If no results or personal query, try without topic filter
+        if not similar_chats and search_threshold > 0.3:
+            # Lower threshold for second attempt
+            fallback_threshold = max(0.3, search_threshold - 0.2)
+            print(f"   Strategy 2: Searching WITHOUT topic filter, threshold={fallback_threshold}")
+            
+            similar_chats = pinecone_service.search_similar_chats(
+                user_id=user_id,
+                query=query,
+                topic=None,  # No topic filter
+                limit=search_limit,
+                threshold=fallback_threshold
+            )
+            
+            if similar_chats:
+                print(f"   ✅ Found {len(similar_chats)} chats without topic filter")
+        
+        # Strategy 3: Last resort - very low threshold search for any context
+        if not similar_chats and not is_personal:
+            print(f"   Strategy 3: Very low threshold search (0.2)")
+            similar_chats = pinecone_service.search_similar_chats(
+                user_id=user_id,
+                query=query,
+                topic=None,
+                limit=search_limit,
+                threshold=0.2
+            )
+            
+            if similar_chats:
+                print(f"   ⚠️ Found {len(similar_chats)} with very low threshold")
+        
+        # -------------------------
+        # 4. DEBUG: Show what we found
+        # -------------------------
+        if similar_chats:
+            print(f"   📊 Search results summary:")
+            for i, chat in enumerate(similar_chats):
+                score = chat.get("score", 0)
+                chat_topic = chat.get("topic", "unknown")
+                user_msg = chat.get("user_message", "")[:50]
+                print(f"     {i+1}. Score: {score:.4f}, Topic: {chat_topic}")
+                print(f"        User: {user_msg}...")
+        else:
+            print(f"   ❌ No similar chats found with any strategy")
+            
+            # Let's see what's in the index for this user
+            try:
+                history = pinecone_service.get_user_chat_history(
+                    user_id=user_id,
+                    limit=5,
+                    topic=None
+                )
+                if history:
+                    print(f"   ℹ️ User has {len(history)} total stored chats:")
+                    for i, chat in enumerate(history):
+                        chat_topic = chat.get("topic", "unknown")
+                        user_msg = chat.get("user_message", "")[:50]
+                        print(f"     {i+1}. Topic: {chat_topic}, User: {user_msg}...")
+                else:
+                    print(f"   ℹ️ User has no stored chats")
+            except Exception as debug_e:
+                print(f"   ℹ️ Could not get user history: {debug_e}")
+        
+        # -------------------------
+        # 5. FORMAT CONTEXT
+        # -------------------------
         context_text = format_retrieved_context(similar_chats)
+        
+        if context_text:
+            print(f"   ✅ Memory context created ({len(similar_chats)} chats)")
+        else:
+            print(f"   ℹ️ No memory context available")
         
         return {
             "context_text": context_text,
-            "similar_chats": similar_chats
+            "similar_chats": similar_chats,
+            "search_debug": {
+                "is_personal": is_personal,
+                "is_code": is_code,
+                "is_concept": is_concept,
+                "original_threshold": 0.75,
+                "used_threshold": search_threshold,
+                "used_topic_filter": search_topic is not None,
+                "found_chats": len(similar_chats)
+            }
         }
         
+    except ImportError as e:
+        print(f"❌ Import error in create_memory_context: {e}")
+        return {"context_text": "", "similar_chats": []}
     except Exception as e:
-        print(f"Error creating memory context: {e}")
+        print(f"❌ Error in create_memory_context: {e}")
+        import traceback
+        traceback.print_exc()
         return {"context_text": "", "similar_chats": []}
     
 
