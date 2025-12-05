@@ -284,8 +284,15 @@ class PineconeService:
             print(f"🔍 SEARCH DEBUG - User: {user_id}, Query: '{query[:100]}...'")
             print(f"   Topic filter: {topic}")
             print(f"   Threshold: {threshold}")
+            print(f"   Limit: {limit}")
             
-            query_embedding = self.create_embedding(query)
+            # For very short queries, add context to improve embedding
+            if len(query.strip()) < 5:
+                enhanced_query = f"User greeting or short message: {query}"
+                print(f"   Enhanced query for embedding: {enhanced_query}")
+                query_embedding = self.create_embedding(enhanced_query)
+            else:
+                query_embedding = self.create_embedding(query)
             
             # Ensure 384D
             if not query_embedding or len(query_embedding) != 384:
