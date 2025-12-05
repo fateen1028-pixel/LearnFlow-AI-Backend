@@ -103,10 +103,10 @@ class AIService:
         """Fetch materials using web search"""
         try:
             # Search for different types of materials
-            video_results = search.run(f"{topic} tutorial video YouTube 2024")
-            article_results = search.run(f"{topic} guide article documentation 2024")
-            practice_results = search.run(f"{topic} practice exercises examples code")
-            tool_results = search.run(f"{topic} tools libraries frameworks")
+            video_results = search(f"{topic} tutorial video YouTube 2024")
+            article_results = search(f"{topic} guide article documentation 2024")
+            practice_results = search(f"{topic} practice exercises examples code")
+            tool_results = search(f"{topic} tools libraries frameworks")
             
             return {
                 "videos": AIService.extract_videos_from_search(video_results),
@@ -501,7 +501,7 @@ class AIService:
                 search_query = f"{topic} {message} tutorial guide examples 2024"
             
             print(f"DEBUG: Performing search with query: {search_query}")
-            search_results = search.run(search_query)
+            search_results = search(search_query)
             
             # Convert chat history
             history_messages = []
