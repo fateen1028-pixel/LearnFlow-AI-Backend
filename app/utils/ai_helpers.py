@@ -4,7 +4,7 @@ import os
 import json
 import re
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
-from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.tools import DuckDuckGoSearchResults
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import JsonOutputParser
 from datetime import datetime
@@ -19,7 +19,7 @@ llm = ChatGoogleGenerativeAI(
     # markdown=False
 )
 
-search = DuckDuckGoSearchRun()
+search_tool = DuckDuckGoSearchResults()
 json_parser = JsonOutputParser()
 
 
@@ -663,6 +663,30 @@ def process_ai_response(raw_text):
         "text": processed_text.strip(),
         "code_blocks": code_blocks
     }
+
+
+
+# Create a wrapper function for backward compatibility
+def search(query: str) -> str:
+    """Wrapper function for DuckDuckGo search with new API."""
+    try:
+        results = search_tool.invoke({"query": query})
+        if isinstance(results, list):
+            # Format results as string
+            formatted_results = []
+            for result in results:
+                if isinstance(result, dict):
+                    formatted_results.append(f"{result.get('title', 'No title')}: {result.get('snippet', 'No description')}")
+                else:
+                    formatted_results.append(str(result))
+            return "\n\n".join(formatted_results)
+        elif isinstance(results, str):
+            return results
+        else:
+            return str(results)
+    except Exception as e:
+        print(f"Search error: {e}")
+        return f"Search failed: {str(e)}"
 
 
 def should_use_search(message: str, topic: str) -> bool:
