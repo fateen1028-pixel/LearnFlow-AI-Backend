@@ -7,7 +7,6 @@ from flask_cors import CORS
 from app.utils.pinecone_service import is_pinecone_available
 
 ai_bp = Blueprint('ai', __name__)
-CORS(ai_bp, resources={r"/ai-env/*": {"origins": "*"}}, supports_credentials=True)
 
 @ai_bp.route("/ask-about-task", methods=["POST"])
 @token_required
